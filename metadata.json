@@ -1,0 +1,7 @@
+{
+  "name": "ResearchLens AI",
+  "description": "Multi-Agent Research & Evidence Intelligence Platform. Developed by Nishant Choudhary.",
+  "author": "Nishant Choudhary",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
