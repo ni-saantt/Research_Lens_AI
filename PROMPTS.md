@@ -1,4 +1,4 @@
-# ResearchLens AI — Prompt Engineering & Architecture Specification
+# ResearchLens AI — Prompt Engineering & Multi-Agent Architecture Specification
 
 **Platform:** ResearchLens AI — Multi-Agent Research & Evidence Intelligence Platform  
 **Developer:** Nishant Choudhary  
@@ -7,32 +7,48 @@
 
 ## 1. Executive Summary & Prompt Philosophy
 
-ResearchLens AI uses a modular prompt architecture to provide specialized instructions, structured outputs, evidence-grounding constraints, and role separation across its multi-agent pipeline. Generative Large Language Models are deployed not as free-form chatbots, but as specialized, constrained NLP processing nodes within an asynchronous multi-agent verification pipeline.
+ResearchLens AI uses an advanced modular prompt architecture to provide specialized instructions, strictly validated structured outputs, closed-world evidence-grounding constraints, and rigorous multi-agent epistemic separation. Rather than treating Generative Large Language Models as unconstrained conversational chatbots, ResearchLens AI orchestrates them as specialized, schema-bound analytical nodes within a self-correcting, multi-stage research and verification pipeline.
 
-Every prompt in this system is architected around four foundational NLP engineering principles:
-1. **Role Specialization & Principle of Least Trust:** Agents do not blindly trust the outputs of preceding agents. The Investigator actively seeks to refute claims discovered by the Explorer, and the Arbiter evaluates both using an explicit hierarchy of authority.
-2. **Schema-Constrained Structured Output:** Every prompt enforces a strictly typed JSON schema validated via Zod, eliminating free-form conversational drift and preventing parsing crashes.
-3. **Multi-Tiered Hallucination Mitigation:** Prompts explicitly forbid external assumption, require exact supporting text snippets from retrieved web pages, and demand uncertainty preservation when evidence is ambiguous.
-4. **Calibrated Confidence Scoring:** Every synthesized fact carries an explicit confidence score ($0.00$ to $1.00$) calibrated against the statutory authority of the underlying source.
+Every prompt across the system is engineered around foundational reliability principles:
+1. **Epistemic Honesty & Null Semantics:** Absences of proof are never represented as factual strings (e.g. "Not disclosed in source", "N/A") marked as verified. Missing values are represented strictly as `null` with verification status `INSUFFICIENT_EVIDENCE` or `MISSING` and `confidenceScore: null`.
+2. **Strict Schema Constraints:** Every LLM interaction is enforced by a comprehensive Zod schema, ensuring parse integrity, deterministic type guarantees, and sanitization of LLM outputs prior to pipeline ingestion.
+3. **Multi-Agent Adversarial Verification:** Agents operate under a principle of least trust. The Investigator vector actively interrogates claims surfaced by the Explorer, while the Arbiter adjudicates disputes using an explicit 11-tier statutory evidence authority hierarchy.
+4. **Self-Correcting Closed Feedback Loop:** When research completeness or entity coverage fails the deterministic Quality Gate, the Research Repair module dynamically reformulates search queries and initiates targeted verification rounds up to a bounded maximum.
+5. **Session Isolation & Zero Contamination:** Every prompt receives context strictly scoped to the active `researchSessionId`, preventing cross-session bleed, stale query cache pollution, or historical contamination.
 
 ---
 
-## 2. End-to-End Prompt Pipeline
+## 2. End-to-End Multi-Agent Architecture Flow
 
 ```mermaid
 graph TD
-    A["User Natural-Language Input"] --> B["Planner Prompt (llama-3.1-8b-instant, T=0.15)"]
-    B --> C["Extracted Entities, Required Fields & Dual Search Strategies"]
-    C --> D["Web Retrieval Engine (Live Search & Cheerio Scraping)"]
-    D --> E["Explorer Prompt (llama-3.3-70b-versatile, T=0.30)"]
-    E --> F["Candidate Claims & Grounded Snippets"]
-    F --> G["Investigator Prompt (llama-3.3-70b-versatile, T=0.15)"]
-    G --> H["Counter-Evidence, Contradictions & Regulatory Filings"]
-    H --> I["Arbiter Prompt (llama-3.3-70b-versatile, T=0.10)"]
-    I --> J["Reconciled Claims, Hierarchy Decisions & Calibrated Confidence"]
-    J --> K["Final Synthesis Prompt (llama-3.3-70b-versatile, T=0.25)"]
-    K --> L["Executive Intelligence Brief & Dynamic Dashboard Spec"]
-    L --> M["Ask the Dataset Prompt (llama-3.1-8b-instant, T=0.10)"]
+    UserQuery["User Research Inquiry"] --> PlannerPrompt["1. Planner Prompt\nIntent Classification & Research Contract"]
+    PlannerPrompt --> Contract["Structured ResearchContract\n(Intent, Target Candidates, Required Entities/Fields)"]
+    
+    Contract --> NeedsDiscovery{Candidate Discovery\nRequired?}
+    NeedsDiscovery -- Yes --> CandidateDisc["2. Candidate Discovery Prompt\n(Surfaces 4-8 Viable Candidates)"]
+    NeedsDiscovery -- No --> DirectEntities["Direct Required Entities\n(e.g., Comparison Entities)"]
+    
+    CandidateDisc & DirectEntities --> WebRetrieval["Live Web Search & Source Relevance Gate\n(Rejects Off-Topic Sources Prior to Scraping)"]
+    
+    WebRetrieval --> ExplorerPrompt["3. Explorer Prompt (Discovery Vector)\nEntity Claims, Verbatim Snippets, Null Missing Fields"]
+    ExplorerPrompt --> DiscoveredClaims["Discovered Claims & Candidate Values"]
+    
+    DiscoveredClaims --> InvestigatorSearch["Targeted Verification Search"]
+    InvestigatorSearch --> InvestigatorPrompt["4. Investigator Prompt (Adversarial Vector)\nAudits Claims, Counter-Evidence, Distinguishes Mutual Absence"]
+    
+    DiscoveredClaims & InvestigatorPrompt --> ConflictDetector["Semantic Conflict Detector\n(Agreement vs Contradiction vs No Comparable Evidence)"]
+    ConflictDetector --> ArbiterPrompt["5. Arbiter Prompt (Statutory Adjudication)\n11-Tier Authority Hierarchy & Null Confidence Preservation"]
+    
+    ArbiterPrompt --> QualityGate["6. Deterministic Quality Gate\n(Evaluates Contract Criteria, Candidate Count, Field Symmetry)"]
+    
+    QualityGate -- Fail (Rounds < 3) --> RepairPrompt["7. Research Repair Prompt\nDynamic Query Reformulation & Targeted Retrieval"]
+    RepairPrompt --> WebRetrieval
+    
+    QualityGate -- Pass OR Max Rounds Reached --> SynthesisPrompt["8. Final Synthesis Prompt\nGrounded Briefing, KPI Cards, Recharts Spec, Transparent Gaps"]
+    
+    SynthesisPrompt --> ResearchDashboard["Research Intelligence Dashboard"]
+    ResearchDashboard --> DatasetPrompt["9. Ask the Dataset Prompt\nClosed-World In-Memory RAG (Excludes Nulls from High-Confidence)"]
 ```
 
 ---
@@ -44,195 +60,231 @@ graph TD
 ### Prompt 1: Research Planner (`src/prompts/plannerPrompt.ts`)
 
 - **Agent:** Research Planner Agent
-- **LLM Engine:** Groq `llama-3.1-8b-instant` (High throughput, deterministic structured output)
-- **Temperature:** `0.15`
-- **Output Schema:** `ResearchPlanSchema` (Zod validated)
+- **LLM Engine:** Groq Flagship Model (`openai/gpt-oss-120b`)
+- **Temperature:** `0.15` (Deterministic classification and scoping)
+- **Output Schema:** `ResearchContractSchema` (Zod validated)
 
 #### Purpose
-Analyzes the user's natural-language inquiry to perform **intent extraction**, **named entity recognition (NER)**, and **problem decomposition**. It splits the research into verifiable attribute fields and generates two independent, non-overlapping search strategies for the subsequent Explorer and Investigator agents.
+Analyzes the user's natural-language inquiry to classify semantic intent into one of 10 canonical categories:
+- `FACT_LOOKUP`
+- `COMPARISON`
+- `RANKING`
+- `RECOMMENDATION`
+- `DISCOVERY`
+- `EXPLORATORY_RESEARCH`
+- `FACT_CHECK`
+- `CURRENT_INFORMATION`
+- `POLICY_OR_REGULATORY`
+- `MULTI_ENTITY_ANALYSIS`
+
+It defines the formal `ResearchContract`, extracting required entities (for comparison or multi-entity inquiries), determining whether Candidate Discovery is required (mandatory for `RANKING`, `RECOMMENDATION`, and `DISCOVERY`), specifying target candidate counts (typically 4–8), defining required attribute fields, and generating orthogonal search strategies.
 
 #### Inputs
-- `userQuery`: The raw natural-language prompt submitted by the user.
-- `domainContext`: Optional geographic or institutional domain constraints.
+- `userQuery`: The raw natural-language query entered by the user.
 
 #### Expected Output
-A strict JSON object containing:
-- `objective`: Formal research objective.
-- `targetEntitiesDescription`: Definition of entities to be discovered.
-- `geographyScope`: Spatial bounds (e.g., "Rajasthan, India" or "Global").
-- `requiredFields`: Minimum of 3 specific attributes to extract per entity.
-- `searchStrategies`:
-  - `explorerFocus`: 3-5 concise search engine keywords for broad entity discovery.
-  - `investigatorFocus`: 3-5 verification keywords targeting primary gazettes, regulatory orders, and statutory disclosures.
-- `verificationRequirements`: Rules defining acceptable proof.
-- `confidenceThreshold`: Numerical standard (default 0.85).
+A strict JSON object conforming to `ResearchContract`:
+```json
+{
+  "intent": "RANKING",
+  "topic": "BTech Colleges",
+  "scope": { "location": "Rajasthan, India" },
+  "candidateDiscoveryRequired": true,
+  "targetCandidateCount": 5,
+  "requiredEntities": [],
+  "requiredFields": ["NIRF_Ranking", "Accreditation", "Placement_Rate", "Average_Tuition_Fee"],
+  "minimumRelevantSourcesPerEntity": 2,
+  "preferredSourceTypes": ["GOVERNMENT_STATUTORY", "REGULATOR", "PRIMARY_ENTITY"],
+  "freshnessRequirement": "latest available",
+  "maximumResearchRounds": 3,
+  "explorerFocus": ["top btech engineering colleges rajasthan nirf ranking", "best engineering institutes rajasthan list"],
+  "investigatorFocus": ["aicte approved engineering colleges rajasthan official list", "nirf 2024 engineering rajasthan ranking official"]
+}
+```
 
-#### Architectural Rationale & Why It Is Structured This Way
-Search engines degrade significantly when fed conversational questions. The Planner converts conversational English into concise, keyword-dense search phrases (3-6 words each) while formulating orthogonal search vectors: one maximizing discovery breadth and one maximizing verification rigor.
-
-#### Hallucination Mitigation & Grounding Strategy
-- Explicitly forbids verbose sentences or meta-instructions in keyword outputs.
-- Forces the definition of concrete `potentialResearchRisks` before any web search commences, priming downstream agents to watch for known failure modes.
-
-#### Error & Fallback Strategy
-If parsing fails, the client uses a repair prompt enforcing pure JSON with `llama-3.1-8b-instant`.
+#### Grounding & Hallucination Safeguards
+- Prohibits conversational padding.
+- Enforces symmetrical attribute fields for all entities in comparison tasks.
+- Flags potential research risks and ambiguity upfront.
 
 ---
 
-### Prompt 2: Explorer Agent (`src/prompts/explorerPrompt.ts`)
+### Prompt 2: Candidate Discovery (`src/prompts/candidateDiscoveryPrompt.ts`)
+
+- **Agent:** Candidate Discovery Specialist
+- **LLM Engine:** Groq Flagship Model (`openai/gpt-oss-120b`)
+- **Temperature:** `0.20`
+- **Output Schema:** `CandidateDiscoveryOutputSchema` (Zod validated)
+
+#### Purpose
+Invoked when `candidateDiscoveryRequired: true` (e.g. for "Best BTech colleges in Rajasthan"). It ingests live web search results from candidate discovery queries, surfaces 4–8 viable, distinctive candidates, normalizes their institutional or entity names, and discards off-topic or noisy matches.
+
+#### Inputs
+- `userQuery`: Original inquiry.
+- `contract`: Active `ResearchContract`.
+- `searchResults`: Array of normalized web search results with titles, snippets, and domains.
+
+#### Expected Output
+```json
+{
+  "candidates": [
+    { "name": "BITS Pilani", "normalizedName": "Birla Institute of Technology and Science, Pilani", "relevanceReason": "Premier engineering institute in Pilani, Rajasthan", "initialConfidence": 0.95 },
+    { "name": "MNIT Jaipur", "normalizedName": "Malaviya National Institute of Technology Jaipur", "relevanceReason": "National Institute of Technology in Jaipur, Rajasthan", "initialConfidence": 0.92 },
+    { "name": "IIT Jodhpur", "normalizedName": "Indian Institute of Technology Jodhpur", "relevanceReason": "Institute of National Importance in Jodhpur, Rajasthan", "initialConfidence": 0.92 }
+  ],
+  "discoveryNotes": "Discovered premier statutory engineering universities in Rajasthan from education rankings."
+}
+```
+
+#### Grounding & Hallucination Safeguards
+- Strictly requires candidate entities to be grounded in the supplied search snippets.
+- Prevents premature commitment to a single candidate for ranking inquiries.
+
+---
+
+### Prompt 3: Explorer Agent (`src/prompts/explorerPrompt.ts`)
 
 - **Agent:** Explorer Agent (Discovery Vector)
-- **LLM Engine:** Groq `llama-3.3-70b-versatile` (Deep comprehension and entity extraction)
-- **Temperature:** `0.30`
+- **LLM Engine:** Groq Flagship Model (`openai/gpt-oss-120b`)
+- **Temperature:** `0.20`
 - **Output Schema:** `ExplorerOutputSchema` (Zod validated)
 
 #### Purpose
-Acts as the broad discovery vector. It ingests unstructured HTML snippets and crawled page contents, identifies candidate entities matching the Research Plan, extracts attribute claims, and ties every extracted field to an authentic source URL and text snippet.
+Acts as the primary broad discovery vector. It ingests scraped web source snippets, extracts attribute claims for all target or candidate entities, grounds every extracted value in a verbatim supporting text snippet and authentic URL, and maps missing information to explicit `null` values with `INSUFFICIENT_EVIDENCE` status.
 
-#### Inputs
-- `plan`: The active `ResearchPlan`.
-- `webSources`: Array of discovered web sources with URLs, titles, and scraped text snippets.
-- `userQuery`: Original query for contextual anchoring.
-
-#### Expected Output
-A JSON object containing:
-- `searchQueriesUsed`: The queries executed.
-- `discoveredEntities`: Array of entity records with extracted fields, candidate values, source URLs, source titles, and supporting quotation snippets.
-- `summaryOfDiscovery`: A factual summary of the landscape surfaced.
-
-#### Hallucination Mitigation & Grounding Strategy
-- **Snippet Requirement:** Every extracted value must be accompanied by a `supportingSnippet` directly quoting or closely paraphrasing the provided web source.
-- **URL Provenance:** The agent is instructed to use only the URLs provided in the input context. It is strictly forbidden from generating synthetic URLs.
-- **Missing Value Honesty:** If an entity lacks a required field in the retrieved text, the agent must mark it as `NOT_DISCLOSED` rather than fabricating an estimate.
+#### Key Directives
+- **Null Semantics Mandate:** If an attribute is absent from the source, the agent must set `extractedValue: null`, `verificationStatus: "INSUFFICIENT_EVIDENCE"`, and provide an honest `missingReason`. It is strictly forbidden from writing "Not disclosed in source" or "N/A" as values.
+- **Entity Symmetrical Extraction:** In comparison or multi-candidate modes, extracts identical fields across all entities to ensure fair evaluation.
 
 ---
 
-### Prompt 3: Investigator Agent (`src/prompts/investigatorPrompt.ts`)
+### Prompt 4: Investigator Agent (`src/prompts/investigatorPrompt.ts`)
 
 - **Agent:** Investigator Agent (Adversarial Verification Vector)
-- **LLM Engine:** Groq `llama-3.3-70b-versatile` (Adversarial reasoning and regulatory checking)
-- **Temperature:** `0.15`
+- **LLM Engine:** Groq Flagship Model (`openai/gpt-oss-120b`)
+- **Temperature:** `0.15` (High adversarial rigor)
 - **Output Schema:** `InvestigatorOutputSchema` (Zod validated)
 
 #### Purpose
-Executes adversarial verification. It takes the candidate claims surfaced by the Explorer and independently audits them against authoritative sources (government filings, regulatory orders, corporate disclosures). It detects discrepancies, pricing shifts, and outdated marketing claims.
+Performs independent adversarial cross-examination. It receives candidate claims surfaced by the Explorer and independently interrogates them against regulatory orders, official disclosures, and statutory archives.
 
-#### Inputs
-- `plan`: Active `ResearchPlan`.
-- `webSources`: Authoritative and regulatory sources retrieved via the investigator's targeted queries.
-- `explorerEntities`: The complete candidate claim matrix from the Explorer Agent.
-
-#### Expected Output
-A JSON object containing:
-- `counterEvidenceOrChallenges`: Discrepancies detected between Explorer's claims and primary sources, with `challengedValue`, `primaryEvidenceValue`, `primarySourceUrl`, and explicit `reasonForDoubtOrConflict`.
-- `verifiedConfirmations`: Claims independently corroborated by primary documentation.
-- `missingFieldsIdentified`: Mandatory fields absent from public statutory filings.
-
-#### Hallucination Mitigation & Grounding Strategy
-- **Adversarial Principle:** The prompt explicitly instructs the LLM: *"Do NOT accept Explorer claims at face value. Demand authoritative evidence."*
-- **Reasoning Requirement:** Demands explicit causal explanations for conflicts (e.g., "Explorer used a 2022 marketing flyer; official 2026 Discom tariff order sets commercial rate at ₹14.50/kWh").
+#### Key Directives
+- **Distinguishing Mutual Absence vs Genuine Contradiction:**
+  - If Explorer reports an attribute as `null` or missing, and Investigator also finds no record, this is classified as `NO_COMPARABLE_EVIDENCE` / `AGREEMENT_ON_ABSENCE`, **never a conflict**.
+  - A conflict is only declared when two substantive, contradictory factual claims exist (e.g., $94\%$ placement vs $81\%$ placement).
+- **Adversarial Scrutiny:** Actively checks for outdated promotional claims, fee revisions, or unofficial directory aggregators.
 
 ---
 
-### Prompt 4: Research Arbiter / Judge (`src/prompts/arbiterPrompt.ts`)
+### Prompt 5: Research Arbiter (`src/prompts/arbiterPrompt.ts`)
 
-- **Agent:** Research Arbiter Agent
-- **LLM Engine:** Groq `llama-3.3-70b-versatile` (High-precision adjudication)
-- **Temperature:** `0.10` (Extremely deterministic)
+- **Agent:** Research Arbiter / Statutory Judge
+- **LLM Engine:** Groq Flagship Model (`openai/gpt-oss-120b`)
+- **Temperature:** `0.10` (Maximum deterministic precision)
 - **Output Schema:** `ArbiterBatchOutputSchema` (Zod validated)
 
 #### Purpose
-Reconciles disagreements between the Explorer and Investigator agents. It applies a **deterministic hierarchy of evidence authority**:
-$$\text{Statutory / Government} \succ \text{Primary Entity Telemetry} \succ \text{Academic / Industry Audit} \succ \text{Journalistic Publication} \succ \text{Aggregator / Directory}$$
+Adjudicates substantive disagreements using a formal 11-tier evidence authority hierarchy:
+1. `GOVERNMENT_STATUTORY` (Gov gazettes, parliamentary acts)
+2. `REGULATOR` (Statutory bodies: AICTE, NIRF, RBI, SEC)
+3. `PRIMARY_ENTITY` (Official university/company portals)
+4. `ACADEMIC_PRIMARY` (Peer-reviewed literature, primary datasets)
+5. `ACADEMIC_SECONDARY` (Systematic reviews, institutional meta-analyses)
+6. `REPUTABLE_PUBLICATION` (Major journalistic newsrooms, established technical journals)
+7. `INDUSTRY_SOURCE` (Industry whitepapers, audited trade reports)
+8. `SECONDARY_DIRECTORY` (Third-party aggregator portals: CollegeDunia, Shiksha)
+9. `AGGREGATOR` (Community forums, social reviews)
+10. `REFERENCE` (General encyclopedic wikis: Wikipedia)
+11. `UNKNOWN` (Unattributed or unverified domains)
 
-It resolves disputes where authoritative evidence prevails, preserves unresolved conflicts where proof is contradictory, and assigns calibrated confidence scores.
-
-#### Inputs
-- `plan`: Active `ResearchPlan`.
-- `conflicts`: Array of detected claim conflicts with opposing values, source authorities, and snippets.
-- `entitiesSummary`: High-level summary of candidate entities.
-
-#### Expected Output
-A JSON object containing:
-- `evaluations`: Array of field-by-field verdicts:
-  - `resolution`: `CONSENSUS`, `INVESTIGATOR_SELECTED`, `EXPLORER_SELECTED`, or `UNRESOLVED`.
-  - `resolvedValue`: The definitive reconciled value.
-  - `confidenceScore`: Calibrated probability between `0.00` and `1.00`.
-  - `decisionBasis`: Rigorous rationale explaining the evidentiary justification.
-  - `freshnessPreferenceApplied`: Boolean flag.
-  - `primarySourcePreferenceApplied`: Boolean flag.
-- `overallAssessment`: Executive evaluation of evidentiary agreement.
-- `conflictsPreserved`: Detailed list of genuine disputes that cannot be statutorily resolved.
-
-#### Hallucination Mitigation & Grounding Strategy
-- **Explicit Uncertainty Preservation:** Prompts explicitly forbid forcing a consensus when evidence is conflicting. True ambiguities are preserved as `UNRESOLVED` with lowered confidence ($<0.50$).
-- **Calibrated Scoring:** Requires high confidence scores ($>0.85$) to be backed by primary/official sources.
+#### Key Directives
+- If two sources conflict, the source higher in the authority hierarchy prevails.
+- When reliable evidence cannot resolve a dispute, the field is preserved as `CONFLICTING` with lowered confidence.
+- Missing values receive `confidenceScore: null`.
 
 ---
 
-### Prompt 5: Final Synthesis & Visualizer (`src/prompts/finalSynthesisPrompt.ts`)
+### Prompt 6: Quality Gate Evaluation (`src/services/orchestrator.ts`)
 
-- **Agent:** Executive Synthesis / Dashboard Visualizer
-- **LLM Engine:** Groq `llama-3.3-70b-versatile`
-- **Temperature:** `0.25`
+- **Execution:** Deterministic TypeScript validation with strict contractual criteria.
+- **Criteria Evaluated:**
+  1. `Required Entities Present`: All explicitly mandated entities (e.g., Python and JavaScript) must have extracted records.
+  2. `Candidate Count Threshold`: Ranking queries must discover $\ge \text{targetCandidateCount}$ (or at least 3).
+  3. `Field Symmetry`: Required fields must be attempted across all entities.
+  4. `Source Relevance`: Accepted sources must pass the deterministic relevance gate ($\ge 0.50$ score).
+  5. `Coverage Ratio`: Minimum percentage of required fields with conclusive or supported evidence.
+  6. `Contamination Freedom`: Asserts zero foreign entity bleed across sessions.
+
+---
+
+### Prompt 7: Research Repair & Reformulation (`src/prompts/researchRepairPrompt.ts`)
+
+- **Agent:** Research Repair Planner
+- **LLM Engine:** Groq Flagship Model (`openai/gpt-oss-120b`)
+- **Temperature:** `0.20`
+- **Output Schema:** `ResearchRepairPlanSchema` (Zod validated)
+
+#### Purpose
+Invoked dynamically if the Quality Gate fails and research rounds remain ($< \text{MAX\_RESEARCH\_ROUNDS} = 3$). It analyzes specific failures (e.g. missing candidate entities, deficient criteria coverage) and reformulates targeted search queries to fill the specific evidence gaps.
+
+#### Inputs
+- `contract`: Original `ResearchContract`.
+- `qualityGate`: Failed `QualityGateResult` with specific failure reasons.
+- `existingEntities`: Currently discovered entities and missing fields.
+
+#### Expected Output
+```json
+{
+  "reformulatedQueries": [
+    "site:nirfindia.org engineering ranking 2024 Rajasthan official PDF",
+    "Malaviya National Institute of Technology Jaipur NIRF 2024 ranking"
+  ],
+  "targetEntitiesToRepair": ["MNIT Jaipur", "IIT Jodhpur"],
+  "targetFieldsToRepair": ["NIRF_Ranking", "Accreditation"],
+  "repairRationale": "Directing search to official NIRF repository for missing statutory ranking data."
+}
+```
+
+---
+
+### Prompt 8: Final Synthesis & Visualization (`src/prompts/finalSynthesisPrompt.ts`)
+
+- **Agent:** Executive Synthesis / Visualizer
+- **LLM Engine:** Groq Flagship Model (`openai/gpt-oss-120b`)
+- **Temperature:** `0.20`
 - **Output Schema:** `DashboardSpecSchema` (Zod validated)
 
 #### Purpose
-Synthesizes verified records into an executive briefing and dynamic dashboard specification. It computes verified KPI summaries, determines optimal chart representations for Recharts, and produces a transparent audit of what could *not* be verified.
-
-#### Inputs
-- `query`: User's original inquiry.
-- `plan`: Research plan specification.
-- `entities`: Array of fully verified and audited `DiscoveredEntity` records.
-- `conflicts`: All reconciled and unresolved conflicts.
-- `sources`: Complete list of audited web sources.
-
-#### Expected Output
-A JSON object containing:
-- `headline`: Professional intelligence brief headline.
-- `summary`: Synthesized briefing connecting findings to the research objective.
-- `metrics`: 4-6 KPI cards with computed values, descriptions, and semantic tones.
-- `charts`: Dynamic bar/pie chart specifications derived from actual entity properties.
-- `tableColumns`: Optimal column schema for the evidence table.
-- `unverifiedObservations`: 3-5 explicit observations detailing data gaps and unverified items.
-
-#### Hallucination Mitigation & Grounding Strategy
-- **Closed Data Constraint:** Charts and metrics must directly map to values present in `entities`. Fabricating external statistics is explicitly penalized in the prompt instructions.
+Synthesizes verified records into an executive briefing and dynamic dashboard specification.
+- Generates 4–6 verified KPI summary cards.
+- Specifies dynamic Recharts visualizations (Bar/Pie charts) derived strictly from substantiated entity properties.
+- **Transparent Gap Reporting:** Dedicated section explicitly documenting which fields could *not* be verified and why.
+- **Comparative Fairness:** In comparison queries, synthesizes both entities symmetrically along identical dimensions.
 
 ---
 
-### Prompt 6: Ask the Dataset (`src/prompts/datasetPrompt.ts`)
+### Prompt 9: Ask the Dataset (`src/prompts/datasetPrompt.ts`)
 
-- **Agent:** Dataset Query Interpreter
-- **LLM Engine:** Groq `llama-3.1-8b-instant` (Fast, strictly bounded retrieval Q&A)
-- **Temperature:** `0.10`
+- **Agent:** Dataset Intelligence Interpreter
+- **LLM Engine:** Groq Flagship Model (`openai/gpt-oss-120b`)
+- **Temperature:** `0.10` (Maximum factual boundedness)
 - **Output Schema:** `AskDatasetResponseSchema` (Zod validated)
 
 #### Purpose
-Powers the natural-language "Ask the Dataset" interface. It enables researchers to query the in-memory verified dataset (e.g., "Which entities have the highest confidence?", "Show unresolved conflicts", "Which sources were most authoritative?").
-
-#### Inputs
-- `question`: Natural language question regarding the active dataset.
-- `entities`: The complete set of verified session entity objects.
-
-#### Expected Output
-A JSON object containing:
-- `answer`: Precise, factual answer citing specific entities and source links.
-- `highlightEntities`: Array of entity names relevant to the answer.
-- `filteredCount`: Number of matching records.
-- `provenanceNote`: Evidentiary basis and source attribution.
-
-#### Hallucination Mitigation & Grounding Strategy
-- **Closed World Assumption:** The prompt explicitly states: *"Answer using ONLY the entities and fields provided in the dataset. Do not bring in facts, entities, numbers, or dates from outside the provided records, even if you know them."*
-- **Transparent Refusal:** If the query asks for information not captured in the session, the prompt mandates stating: *"The current research dataset does not contain sufficient verified evidence to answer this question."*
+Enables conversational queries strictly grounded in the active session dataset.
+- **Deterministic Priority Handlers:** Programmatically handles "highest confidence" queries by filtering for substantiated claims with `confidenceScore > 0` and sorting descending. Missing/null fields are strictly excluded.
+- **Insufficient Evidence Queries:** Programmatically lists fields marked `INSUFFICIENT_EVIDENCE` or `MISSING` along with their recorded failure reasons.
+- **Source Inquiries:** Programmatically lists accepted sources filtered by authority type and URL.
 
 ---
 
 ## 4. Production Engineering & Architectural Safeguards
 
-| Engineering Safeguard | Implementation & Architectural Evidence |
+| Safeguard | Implementation & Evidence |
 | :--- | :--- |
-| **Code Efficiency & Modularity** | Modular prompt builders in `src/prompts/`, TypeScript interfaces, strict Zod schema validation, and zero prompt duplication across components. |
-| **API Resilience & Rate Management** | Centralized in `src/services/groqClient.ts` with timeout handling (30s), exponential backoff, rate-limit resilience (429), and temperature tuning per agent role. |
-| **Prompt Precision & Token Economy** | Concise, domain-grounded system prompts with explicit few-shot formats, closed-world constraints, and strict JSON output schemas. |
-| **Epistemic Integrity & Verification** | Real multi-agent separation where agents cross-examine, refute, and adjudicate evidence rather than acting as a superficial wrapper. |
+| **Strict Null Semantics** | In `src/services/schemas.ts`, `sanitizeClaimValue` automatically maps missing strings to `null` with `null` confidence. |
+| **Source Relevance Gate** | In `src/services/webSearch.ts`, `validateSourceRelevance` computes keyword and domain overlap, rejecting off-topic sources before scraping. |
+| **Session Isolation** | In `src/services/orchestrator.ts`, all state is scoped to `sessionId`. Web search cache keys include normalized query strings. |
+| **Authority Classification** | In `src/services/scraper.ts`, 11 contextual authority tiers classify sources based on TLD, domain ownership, and publisher reputation. |
+| **Quality Gate & Repair Loop** | Deterministic quality evaluation triggers up to 3 bounded self-correcting repair iterations with query reformulation. |
+| **Truthful Architecture** | UI and documentation accurately describe the sequential dual-vector investigation pipeline. |

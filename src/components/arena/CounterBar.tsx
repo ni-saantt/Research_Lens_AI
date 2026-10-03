@@ -16,6 +16,7 @@ import {
   Percent
 } from 'lucide-react';
 import { ResearchState } from '../../types/research';
+import { computeCanonicalMetrics } from '../../utils/statusHelpers';
 
 interface CounterBarProps {
   state: ResearchState;
@@ -27,23 +28,17 @@ export function CounterBar({ state }: CounterBarProps) {
   const entitiesCount = state.entities.length;
   const claimsCount = state.claims.length;
   const conflictsCount = state.conflicts.length;
-  const verifiedCount = state.entities.filter(e => e.overallStatus === 'VERIFIED').length;
-  const missingCount = state.entities.filter(e => e.overallStatus === 'INCOMPLETE').length;
-
-  const totalPossible = entitiesCount || 1;
-  const coveragePercent = entitiesCount > 0 
-    ? Math.round(state.entities.reduce((acc, e) => acc + e.evidenceCoverage, 0) / totalPossible)
-    : 0;
+  const metrics = computeCanonicalMetrics(state.entities);
 
   const items = [
     { label: 'SOURCES', val: sourcesCount, icon: <Globe className="w-3.5 h-3.5 text-cyan-400" /> },
     { label: 'PAGES SCRAPED', val: pagesScraped, icon: <FileText className="w-3.5 h-3.5 text-indigo-400" /> },
     { label: 'ENTITIES', val: entitiesCount, icon: <Database className="w-3.5 h-3.5 text-purple-400" /> },
     { label: 'CLAIMS', val: claimsCount, icon: <Tag className="w-3.5 h-3.5 text-blue-400" /> },
-    { label: 'VERIFIED', val: verifiedCount, icon: <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />, tone: 'text-emerald-400' },
+    { label: 'VERIFIED', val: metrics.verifiedCount, icon: <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />, tone: 'text-emerald-400' },
     { label: 'CONFLICTS', val: conflictsCount, icon: <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />, tone: conflictsCount > 0 ? 'text-rose-400' : 'text-neutral-400' },
-    { label: 'MISSING DATA', val: missingCount, icon: <HelpCircle className="w-3.5 h-3.5 text-amber-400" /> },
-    { label: 'EVIDENCE COVERAGE', val: `${coveragePercent}%`, icon: <Percent className="w-3.5 h-3.5 text-cyan-400" /> },
+    { label: 'INSUFFICIENT', val: metrics.insufficientCount, icon: <HelpCircle className="w-3.5 h-3.5 text-amber-400" /> },
+    { label: 'COVERAGE', val: `${metrics.evidenceCoverage}%`, icon: <Percent className="w-3.5 h-3.5 text-cyan-400" /> },
   ];
 
   return (

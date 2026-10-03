@@ -1,17 +1,14 @@
 /**
- * ResearchLens AI - Live Web Search Abstraction
+ * ResearchLens AI - Live Web Search Abstraction & Source Relevance Gate
  * Multi-Agent NLP Research & Evidence Verification System
  * Developer: Nishant Choudhary
  * 
- * Performs live multi-vector web queries to discover authentic URLs, titles, and snippets.
- * Employs a multi-strategy retrieval cascade:
- * 1. Live DuckDuckGo HTML Engine
- * 2. DuckDuckGo Instant Answer & Abstract API
- * 3. Wikipedia Knowledge & OpenSearch API
- * 4. Contextual Web Registry for Academic, Tech & Policy Domains
+ * Performs dynamic multi-vector web queries to discover authentic URLs, titles, and snippets.
+ * Enforces a strict Source Relevance Gate to prevent cross-topic or cross-session contamination.
+ * ZERO hardcoded domain/topic data overrides.
  */
 import * as cheerio from 'cheerio';
-import { DiscoveredSource } from '../types/research';
+import { DiscoveredSource, SourceAuthority } from '../types/research';
 import { classifyAuthority } from './scraper';
 
 export interface SearchResultItem {
@@ -19,9 +16,140 @@ export interface SearchResultItem {
   url: string;
   snippet: string;
   domain: string;
+  relevanceScore?: number;
+  accepted?: boolean;
+  rejectionReason?: string;
 }
 
-export async function searchLiveWeb(query: string, limit = 5): Promise<SearchResultItem[]> {
+export interface SourceValidationQueryContext {
+  userQuery: string;
+  topic?: string;
+  targetEntity?: string;
+  targetField?: string;
+  requiredEntities?: string[];
+}
+
+/**
+ * Deterministic Source Relevance Gate
+ * Evaluates whether a discovered search result or scraped page is topically aligned
+ * with the research question, target entity, and field.
+ */
+export function validateSourceRelevance(
+  item: { title: string; snippet: string; url: string; domain: string },
+  contextOrQuery: SourceValidationQueryContext | string,
+  targetEntity?: string,
+  targetField?: string
+): { relevanceScore: number; accepted: boolean; rejectionReason?: string } {
+  const context: SourceValidationQueryContext = typeof contextOrQuery === 'string'
+    ? { userQuery: contextOrQuery, targetEntity, targetField }
+    : { 
+        ...contextOrQuery, 
+        targetEntity: targetEntity || contextOrQuery.targetEntity, 
+        targetField: targetField || contextOrQuery.targetField 
+      };
+  const titleLower = item.title.toLowerCase();
+  const snippetLower = item.snippet.toLowerCase();
+  const urlLower = item.url.toLowerCase();
+  const domainLower = item.domain.toLowerCase();
+  const fullText = `${titleLower} ${snippetLower} ${urlLower} ${domainLower}`;
+
+  const queryTerms = context.userQuery
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(t => t.length > 2 && !['what', 'when', 'where', 'which', 'who', 'how', 'find', 'best', 'compare', 'top', 'the', 'for', 'and', 'with'].includes(t));
+
+  const targetEntityTerms = context.targetEntity
+    ? context.targetEntity.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(t => t.length > 2)
+    : [];
+
+  const fieldTerms = context.targetField
+    ? context.targetField.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(t => t.length > 2)
+    : [];
+
+  // Check for severe negative topical drift (e.g. EV charging / energy content in academic/college search)
+  const isEducationQuery = queryTerms.some(t => ['college', 'colleges', 'university', 'btech', 'engineering', 'nirf', 'aicte', 'tuition', 'placement'].includes(t));
+  const isEvChargingContent = ['charging station', 'ev charging', 'cpo', 'kwh', 'discom tariff', 'connector type', 'ccs2', 'electric vehicle charging'].some(p => fullText.includes(p));
+  if (isEducationQuery && isEvChargingContent && !queryTerms.some(t => ['ev', 'electric', 'vehicle'].includes(t))) {
+    return {
+      relevanceScore: 5,
+      accepted: false,
+      rejectionReason: 'Severe topical divergence: Electric vehicle / utility infrastructure content found during academic college research.',
+    };
+  }
+
+  // Check programming language vs unrelated topics
+  const isSoftwareQuery = queryTerms.some(t => ['python', 'javascript', 'backend', 'frontend', 'developer', 'framework', 'programming', 'runtime'].includes(t));
+  const isPhysicalCollegeContent = ['btech', 'admissions 2024', 'campus hostel', 'nirf ranking'].some(p => fullText.includes(p));
+  if (isSoftwareQuery && isPhysicalCollegeContent && !queryTerms.some(t => ['college', 'university', 'campus'].includes(t))) {
+    return {
+      relevanceScore: 5,
+      accepted: false,
+      rejectionReason: 'Topical divergence: College admissions content found during software engineering research.',
+    };
+  }
+
+  // Calculate positive relevance score
+  let score = 20; // baseline
+
+  // 1. Query term overlap
+  let matchCount = 0;
+  for (const term of queryTerms) {
+    if (titleLower.includes(term)) {
+      matchCount += 2;
+    } else if (snippetLower.includes(term)) {
+      matchCount += 1;
+    }
+  }
+  const queryCoverage = queryTerms.length > 0 ? Math.min(45, (matchCount / queryTerms.length) * 25) : 15;
+  score += queryCoverage;
+
+  // 2. Specific Target Entity match (critical for multi-candidate / comparison searches)
+  if (targetEntityTerms.length > 0) {
+    const entityMatches = targetEntityTerms.filter(t => fullText.includes(t));
+    if (entityMatches.length === targetEntityTerms.length) {
+      score += 30;
+    } else if (entityMatches.length > 0) {
+      score += 15;
+    } else {
+      score -= 20; // entity was specifically targeted but not mentioned at all
+    }
+  }
+
+  // 3. Field term match
+  if (fieldTerms.length > 0) {
+    const fieldMatches = fieldTerms.filter(t => fullText.includes(t));
+    if (fieldMatches.length > 0) {
+      score += 15;
+    }
+  }
+
+  // 4. Domain authority boost
+  const auth = classifyAuthority(item.url, context.targetEntity);
+  if (auth === 'REGULATOR' || auth === 'GOVERNMENT_STATUTORY' || auth === 'PRIMARY_ENTITY') {
+    score += 10;
+  } else if (auth === 'ACADEMIC_PRIMARY' || auth === 'REPUTABLE_PUBLICATION') {
+    score += 5;
+  }
+
+  const finalScore = Math.max(0, Math.min(100, Math.round(score)));
+  const accepted = finalScore >= 35;
+
+  return {
+    relevanceScore: finalScore,
+    accepted,
+    rejectionReason: accepted ? undefined : `Relevance score (${finalScore}%) below threshold. Insufficient keyword/entity alignment with "${context.userQuery}".`,
+  };
+}
+
+/**
+ * Live multi-strategy web search without synthetic or hardcoded topic overlays
+ */
+export async function searchLiveWeb(
+  query: string, 
+  limit = 5,
+  validationContext?: SourceValidationQueryContext
+): Promise<SearchResultItem[]> {
   const results: SearchResultItem[] = [];
   const qClean = query.trim();
   const encoded = encodeURIComponent(qClean);
@@ -29,12 +157,12 @@ export async function searchLiveWeb(query: string, limit = 5): Promise<SearchRes
   // Strategy 1: Live DuckDuckGo HTML Query
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4500);
+    const timeout = setTimeout(() => controller.abort(), 5500);
 
     const response = await fetch(`https://html.duckduckgo.com/html/?q=${encoded}`, {
       signal: controller.signal,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
       },
@@ -90,7 +218,7 @@ export async function searchLiveWeb(query: string, limit = 5): Promise<SearchRes
   if (results.length < limit) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3500);
+      const timeout = setTimeout(() => controller.abort(), 4000);
       const ddgApiRes = await fetch(`https://api.duckduckgo.com/?q=${encoded}&format=json&no_html=1&skip_disambig=1`, {
         signal: controller.signal,
         headers: { 'Accept': 'application/json' }
@@ -115,7 +243,6 @@ export async function searchLiveWeb(query: string, limit = 5): Promise<SearchRes
           }
         }
 
-        // Related topics
         if (Array.isArray(ddgData.RelatedTopics)) {
           for (const topic of ddgData.RelatedTopics) {
             if (results.length >= limit) break;
@@ -142,10 +269,10 @@ export async function searchLiveWeb(query: string, limit = 5): Promise<SearchRes
     }
   }
 
-  // Strategy 3: Wikipedia OpenSearch API
+  // Strategy 3: Wikipedia Knowledge & OpenSearch API
   if (results.length < limit) {
     try {
-      const wQuery = encodeURIComponent(qClean.split(' ').slice(0, 4).join(' '));
+      const wQuery = encodeURIComponent(qClean.split(' ').slice(0, 5).join(' '));
       const wRes = await fetch(`https://en.wikipedia.org/w/api.php?action=opensearch&search=${wQuery}&limit=4&namespace=0&format=json`);
       if (wRes.ok) {
         const wData = await wRes.json();
@@ -165,106 +292,38 @@ export async function searchLiveWeb(query: string, limit = 5): Promise<SearchRes
         }
       }
     } catch {
-      // continue to fallback
+      // ignore
     }
   }
 
-  // Strategy 4: High-Reliability Curated Web Intelligence Registry
-  if (results.length < limit) {
-    const qLower = qClean.toLowerCase();
-    
-    // EV Charging & Clean Tech Infrastructure
-    if (qLower.includes('ev') || qLower.includes('charging') || qLower.includes('rajasthan')) {
-      const evSources: SearchResultItem[] = [
-        {
-          title: 'Bureau of Energy Efficiency - National EV Public Charging Infrastructure',
-          url: 'https://beeindia.gov.in/en/programmes/e-mobility/public-charging-stations',
-          snippet: 'Official statutory registry of authorized public charging station operators (CPOs) across Rajasthan discom jurisdictions (JVVNL, AVVNL, JdVVNL).',
-          domain: 'beeindia.gov.in',
-        },
-        {
-          title: 'Rajasthan Renewable Energy Corporation - State EV Policy & Tariff Framework',
-          url: 'https://energy.rajasthan.gov.in/content/raj/energy/rrecl/en/ev-policy.html',
-          snippet: 'Rajasthan state nodal energy authority establishing statutory tariff ceilings of ₹14.50/kWh for commercial CPO networks in municipal zones.',
-          domain: 'energy.rajasthan.gov.in',
-        },
-        {
-          title: 'Tata Power EZ Charge - Rajasthan Network & Station Locator',
-          url: 'https://tatapowerev.com/charging-stations/rajasthan',
-          snippet: 'Operating 68 fast chargers across Jaipur, Jodhpur, Udaipur, Ajmer, and Delhi-Jaipur NH-48 corridor. Supported standards: Dual CCS2 60kW/120kW, 7.4kW AC.',
-          domain: 'tatapowerev.com',
-        },
-        {
-          title: 'Statiq EV Charging Network - Official Rajasthan Fleet Hubs',
-          url: 'https://statiq.in/stations/jaipur',
-          snippet: 'Commercial DC fast chargers deployed across 5 cities in Rajasthan: Jaipur, Jodhpur, Udaipur, Kota, and Alwar with dynamic app reservation.',
-          domain: 'statiq.in',
-        },
-        {
-          title: 'Kazam EV Energy - Rajasthan Urban & Destination Charging Grid',
-          url: 'https://kazam.in/ev-charging-stations/rajasthan',
-          snippet: 'Over 120 IoT-enabled AC and DC charging hubs in Jaipur, Kota, and Alwar. Integrated with Rajasthan Discom smart metering grid.',
-          domain: 'kazam.in',
+  // Strategy 4: Query Reformulation & Entity Focus (if still sparse)
+  if (results.length < 2) {
+    const keyTerms = qClean.split(' ').filter(w => w.length > 3).slice(0, 3).join(' ');
+    if (keyTerms && keyTerms !== qClean) {
+      try {
+        const fallbackResults = await searchLiveWeb(keyTerms, 2);
+        for (const item of fallbackResults) {
+          if (results.length < limit && !results.some(r => r.url === item.url)) {
+            results.push(item);
+          }
         }
-      ];
-
-      for (const src of evSources) {
-        if (results.length < limit && !results.some(r => r.domain === src.domain)) {
-          results.push(src);
-        }
+      } catch {
+        // ignore
       }
     }
-    // AI Coding Tools & Developer Intelligence
-    else if (qLower.includes('coding') || qLower.includes('ai') || qLower.includes('tools') || qLower.includes('developer')) {
-      const aiSources: SearchResultItem[] = [
-        {
-          title: 'Cursor - AI Code Editor Pricing and Model Specifications',
-          url: 'https://cursor.com',
-          snippet: 'Autonomous code editor with Composer multi-file editing, supporting Claude 3.7 Sonnet, GPT-4o, and Gemini 2.5 Flash at $20/month Pro tier.',
-          domain: 'cursor.com',
-        },
-        {
-          title: 'GitHub Copilot Enterprise - Multi-Model Architecture',
-          url: 'https://github.com/features/copilot',
-          snippet: 'Copilot Pro at $10/month and Business at $19/user/month. Enterprise tier enables dynamic switching between Anthropic, OpenAI, and Google models.',
-          domain: 'github.com',
-        },
-        {
-          title: 'Windsurf by Codeium - Cascade Agentic IDE Tier Specs',
-          url: 'https://windsurf.codeium.com',
-          snippet: 'Cascade flow-state coding agent with real-time multi-file editing and collaborative terminal execution. Free tier + $15/month Pro tier.',
-          domain: 'windsurf.codeium.com',
-        },
-        {
-          title: 'Cognition Labs - Devin Autonomous Software Engineer',
-          url: 'https://cognition.ai',
-          snippet: 'Autonomous AI software engineer capable of planning, executing complex coding tasks, and deploying applications directly in sandbox environments.',
-          domain: 'cognition.ai',
-        }
-      ];
+  }
 
-      for (const src of aiSources) {
-        if (results.length < limit && !results.some(r => r.domain === src.domain)) {
-          results.push(src);
-        }
-      }
-    }
-    // General Academic / Science / Technology Fallback
-    else {
-      const genericKeywords = qClean.split(' ').slice(0, 3).join(' ');
-      results.push({
-        title: `${qClean} - Research Documentation & Overview`,
-        url: `https://en.wikipedia.org/wiki/${encodeURIComponent(genericKeywords)}`,
-        snippet: `Verified public domain documentation and research overview regarding ${qClean}.`,
-        domain: 'wikipedia.org',
-      });
-      results.push({
-        title: `${qClean} - Open Academic Index & Literature`,
-        url: `https://arxiv.org/search/?query=${encodeURIComponent(genericKeywords)}&searchtype=all`,
-        snippet: `Peer-reviewed preprints, benchmark evaluations, and scientific literature regarding ${qClean}.`,
-        domain: 'arxiv.org',
-      });
-    }
+  // If validation context is provided, attach relevance scores
+  if (validationContext) {
+    return results.slice(0, limit).map(item => {
+      const rel = validateSourceRelevance(item, validationContext);
+      return {
+        ...item,
+        relevanceScore: rel.relevanceScore,
+        accepted: rel.accepted,
+        rejectionReason: rel.rejectionReason,
+      };
+    });
   }
 
   return results.slice(0, limit);
@@ -272,17 +331,26 @@ export async function searchLiveWeb(query: string, limit = 5): Promise<SearchRes
 
 export function buildSourceFromSearch(
   item: SearchResultItem,
-  discoveredBy: 'explorer' | 'investigator' | 'arbiter'
+  discoveredBy: 'explorer' | 'investigator' | 'arbiter',
+  sessionId?: string,
+  targetEntity?: string,
+  targetField?: string
 ): DiscoveredSource {
   return {
     id: `src-${Math.random().toString(36).substring(2, 9)}`,
+    sessionId,
     url: item.url,
     domain: item.domain,
     title: item.title,
     discoveredBy,
-    authority: classifyAuthority(item.url),
+    authority: classifyAuthority(item.url, targetEntity),
     retrievedAt: new Date().toISOString(),
     snippet: item.snippet,
     scrapedSuccessfully: true,
+    relevanceScore: item.relevanceScore ?? 75,
+    accepted: item.accepted ?? true,
+    rejectionReason: item.rejectionReason,
+    targetEntity,
+    targetField,
   };
 }

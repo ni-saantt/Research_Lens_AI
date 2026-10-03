@@ -6,389 +6,201 @@ Developed by **Nishant Choudhary**
 
 ---
 
-## Overview
+## 1. Overview & Core Philosophy
 
-**ResearchLens AI** is an autonomous multi-agent research and evidence intelligence platform that transforms complex natural-language questions into structured, evidence-backed insights. Instead of relying on conversational chatbots that summarize search results without verification, ResearchLens AI deploys an adversarial multi-agent pipeline where specialized AI agents independently investigate information, cross-check findings across sources, detect contradictions, and synthesize results with transparent confidence and source attribution.
+**ResearchLens AI** is an autonomous multi-agent research and evidence intelligence platform that transforms complex natural-language questions into rigorously validated, source-grounded insights. Rather than deploying conversational chatbots that summarize search results without verification, ResearchLens AI executes an adversarial, multi-stage multi-agent pipeline where specialized AI agents independently plan research strategies, discover candidates, evaluate source relevance, audit claims, detect substantive contradictions, and synthesize verified results.
 
-Every claim discovered by the platform is extracted as a discrete structured entity, cross-examined against authoritative records, linked to its verbatim source passage, and evaluated using an explicit hierarchy of evidentiary authority.
+### The Grounding Principle: Correctness Over Forced Completeness
 
----
+The defining design principle of ResearchLens AI is:
 
-## Why ResearchLens AI?
+> **"For any research question, ResearchLens AI must either produce a properly supported, source-grounded result OR explicitly explain which parts could not be verified. It must never fabricate an answer simply because the pipeline needs to complete."**
 
-Modern Large Language Models possess exceptional reasoning capabilities, but deploying them as simple chatbots for research introduces critical failure modes:
-
-- **Hallucinated Citations:** Generating non-existent URLs, fictitious statistics, or fabricated dates.
-- **Confirmation Bias:** Trusting the first retrieved web page without cross-checking corroborating sources.
-- **Temporal Inconsistency:** Quoting outdated drafts, deprecated pricing, or expired regulatory filings as active truth.
-- **Uncertainty Masking:** Expressing equal conversational confidence in verified facts and ungrounded guesses.
-
-**ResearchLens AI** solves these challenges by treating research verification as a formal NLP problem combining **Information Extraction (IE)**, **Named Entity Recognition (NER)**, **Natural Language Inference (NLI)**, **Multi-Agent Epistemic Arbitration**, and **Closed-Domain Semantic Reasoning**.
+- **Missing values are represented as `null`**, never as pseudo-factual strings like `"Not disclosed in source"` or `"N/A"` marked as verified.
+- **Missing values carry `confidenceScore: null`**, ensuring unverified data never inflates research confidence metrics.
+- **Evidence Coverage $\neq$ Confidence $\neq$ Completeness**: A research session can be $98\%$ confident in 2 verified fields while maintaining $40\%$ overall evidence coverage.
 
 ---
 
-## Core Capabilities
-
-- **Autonomous Research Decomposition:** Deconstructs broad inquiries into verifiable attributes, scope constraints, and targeted search vectors.
-- **Dual-Vector Investigation:** Runs two independent agents with orthogonal goals—an **Explorer Agent** optimizing for breadth and discovery, and an **Investigator Agent** optimizing for adversarial scrutiny and regulatory verification.
-- **Contradiction Detection & Adjudication:** Flags numerical, temporal, and factual disagreements across sources and adjudicates them using a statutory authority hierarchy.
-- **Transparent Confidence Calibration:** Calculates state-derived confidence scores ($0.00$ to $1.00$) reflecting source authority, corroboration level, and unresolved discrepancies.
-- **Real State-Derived Analytics:** Generates interactive dashboards with Recharts visualizations, evidence matrices, and source intelligence based entirely on actual pipeline state.
-- **Closed-World Retrieval Q&A:** "Ask the Research Dataset" allows natural-language questioning strictly grounded in verified session entities, refusing to hallucinate external facts.
-
----
-
-## How It Works
-
-The platform operates through a sequential 6-stage lifecycle:
-
-```mermaid
-graph LR
-    Ask["1. Ask"] --> Plan["2. Plan"]
-    Plan --> Investigate["3. Investigate"]
-    Investigate --> CrossVerify["4. Cross-Verify"]
-    CrossVerify --> Resolve["5. Resolve"]
-    Resolve --> Synthesize["6. Synthesize"]
-```
-
-1. **Ask:** The user inputs an unstructured natural-language inquiry with geographic, domain, or comparative requirements.
-2. **Plan:** The Planner Agent extracts intent, identifies entities, defines required attributes, and formulates orthogonal search keyword strategies.
-3. **Investigate:** The web engine queries search providers and scrapes authoritative pages; the Explorer Agent extracts candidate claims with citations.
-4. **Cross-Verify:** The Investigator Agent audits candidate claims against primary company portals and statutory regulatory orders.
-5. **Resolve:** The Arbiter Agent cross-examines findings, detects contradictions, applies the evidence hierarchy, and calibrates confidence.
-6. **Synthesize:** The Synthesis Agent generates an executive briefing and dynamic dashboard specification, while the session is immediately queryable via Ask the Dataset.
-
----
-
-## Multi-Agent Architecture
-
-ResearchLens AI enforces strict role separation and a principle of least trust across four specialized agents:
+## 2. End-to-End Self-Correcting Research Architecture
 
 ```mermaid
 graph TD
-    UserQuery["User Research Inquiry"] --> PlannerAgent["Planner Agent\n(llama-3.1-8b-instant)"]
-    PlannerAgent --> PlanSpec["Research Plan & Dual Keyword Strategies"]
+    UserQuery["User Natural Language Research Question"] --> IntentClassifier["1. Query Understanding & Intent Classification\n(10 Semantic Intent Types)"]
+    IntentClassifier --> Contract["2. Structured Research Contract\n(Candidate Requirements, Entity Slots, Required Fields)"]
     
-    subgraph ParallelInvestigation["Dual-Vector Autonomous Investigation"]
-        PlanSpec --> WebScrape["Live Web Engine & Cheerio Scraper"]
-        WebScrape --> ExplorerAgent["Explorer Agent (Discovery)\n(llama-3.3-70b-versatile)"]
-        WebScrape --> InvestigatorAgent["Investigator Agent (Adversarial)\n(llama-3.3-70b-versatile)"]
-        ExplorerAgent --> CandidateClaims["Candidate Claims & Snippets"]
-        InvestigatorAgent --> AuditedEvidence["Regulatory Orders & Counter-Evidence"]
-    end
+    Contract --> NeedDiscovery{Candidate Discovery\nRequired?}
+    NeedDiscovery -- Yes (Ranking/Best) --> DiscoveryModule["3. Candidate Discovery Phase\n(Surfaces 4-8 Viable Candidates)"]
+    NeedDiscovery -- No (Comparison/Fact) --> DirectScope["Direct Entity Scope\n(e.g., Python & JavaScript)"]
     
-    CandidateClaims & AuditedEvidence --> ArbiterAgent["Research Arbiter / Judge\n(llama-3.3-70b-versatile)"]
-    ArbiterAgent --> ReconciledKnowledge["Reconciled Claims & Calibrated Confidence"]
+    DiscoveryModule & DirectScope --> SearchModule["4. Live Web Search & Retrieval"]
+    SearchModule --> RelevanceGate["5. Deterministic Source Relevance Gate\n(Topic/Entity Overlap, Discards Off-Topic Sources Prior to Scraping)"]
     
-    ReconciledKnowledge --> SynthesisAgent["Synthesis Agent\n(llama-3.3-70b-versatile)"]
-    SynthesisAgent --> ExecutiveDashboard["Research Intelligence Dashboard"]
-    ReconciledKnowledge --> AskDataset["Ask the Research Dataset\n(llama-3.1-8b-instant)"]
+    RelevanceGate --> CheerioScraper["6. HTML Scraper & Content Normalizer"]
+    CheerioScraper --> ExplorerAgent["7. Explorer Agent (Discovery Vector)\n(Multi-Entity Extraction, Null Semantics)"]
+    
+    ExplorerAgent --> DiscoveredClaims["Candidate Claims & Grounded Snippets"]
+    DiscoveredClaims --> InvestigatorAgent["8. Investigator Agent (Adversarial Vector)\n(Regulatory Checks, Mutual Absence vs Contradiction)"]
+    
+    DiscoveredClaims & InvestigatorAgent --> Arbiter["9. Research Arbiter / Statutory Judge\n(11-Tier Authority Hierarchy & Targeted Verification)"]
+    
+    Arbiter --> QualityGate["10. Deterministic Quality Gate\n(Evaluates Contract Criteria, Symmetry, Coverage)"]
+    
+    QualityGate -- Fail (Rounds < 3) --> RepairLoop["11. Research Repair Planner\n(Dynamic Query Reformulation & Targeted Search)"]
+    RepairLoop --> SearchModule
+    
+    QualityGate -- Pass OR Max Rounds (3) --> FinalSynthesis["12. Final Synthesis & Dynamic Dashboard\n(Grounded Briefing, KPI Cards, Recharts, Transparent Gaps)"]
+    
+    FinalSynthesis --> ClosedRAG["13. Ask the Research Dataset\n(Closed-World RAG Strictly Grounded in Active Session Records)"]
 ```
 
-### Agent Responsibilities
+---
 
-| Agent | Model Engine | Temperature | Primary Responsibility |
+## 3. Key Upgrades & Architectural Pillars
+
+### A. Query Understanding & Semantic Intent Classification
+The Planner Agent analyzes user inquiries and classifies them into one of 10 canonical intents:
+- `FACT_LOOKUP`: Targeted factual queries (e.g. *"When was Python 3.11 officially released?"*). Bypasses unnecessary candidate discovery.
+- `COMPARISON`: Comparative evaluations (e.g. *"Compare Python and JavaScript for backend development"*). Enforces symmetrical research across all requested entities.
+- `RANKING` / `RECOMMENDATION` / `DISCOVERY`: Evaluative queries (e.g. *"Find best college in Rajasthan for BTech"*). Triggers candidate discovery first.
+- `EXPLORATORY_RESEARCH`, `FACT_CHECK`, `CURRENT_INFORMATION`, `POLICY_OR_REGULATORY`, `MULTI_ENTITY_ANALYSIS`.
+
+### B. Candidate Discovery Phase
+For ranking and recommendation inquiries, ResearchLens AI executes a dedicated Candidate Discovery phase to identify 4–8 plausible candidate entities from search results before evaluating detailed criteria. The system normalizes institutional names, eliminates duplicates, and refuses to prematurely commit to a single candidate.
+
+### C. Deterministic Source Relevance Gate
+Before any retrieved URL is scraped or provided to an agent, it must pass through the `validateSourceRelevance` layer. The relevance gate calculates:
+- Query keyword overlap
+- Entity mention overlap
+- Topic domain compatibility
+- Rejection reason logging (e.g., rejecting EV charging sources when researching college admissions)
+
+Sources scoring below the threshold are dropped immediately, saving scraper bandwidth and guaranteeing zero off-topic hallucination.
+
+### D. Strict Session Isolation & Cache Safety
+Every research session generates a unique, cryptographically distinct `researchSessionId` (`research_<timestamp>_<uuid>`).
+- All claims, sources, entities, conflicts, arbiter evaluations, and metrics belong exclusively to that session.
+- Web search caching incorporates normalized query parameters (`q`, `count`), ensuring cross-session queries never contaminate fresh research.
+- "Ask the Dataset" operates exclusively on the active session's in-memory records.
+
+### E. 11-Tier Evidentiary Authority Hierarchy
+When evaluating claims and adjudicating disputes, ResearchLens AI applies a contextual 11-tier statutory authority classification:
+1. `GOVERNMENT_STATUTORY`: Official government gazettes, acts of parliament, national legislation.
+2. `REGULATOR`: Statutory oversight bodies (e.g. NIRF, AICTE, UGC, RBI, SEC, BEE).
+3. `PRIMARY_ENTITY`: Official domain of the subject entity (e.g. university official portal, corporate investor relations).
+4. `ACADEMIC_PRIMARY`: Peer-reviewed research papers, primary datasets.
+5. `ACADEMIC_SECONDARY`: Institutional meta-analyses, systematic surveys.
+6. `REPUTABLE_PUBLICATION`: Major established newsrooms, leading technical journalism.
+7. `INDUSTRY_SOURCE`: Audited industry benchmarks, trade association reports.
+8. `SECONDARY_DIRECTORY`: Third-party aggregator portals (e.g. CollegeDunia, Shiksha).
+9. `AGGREGATOR`: Community review platforms, forums.
+10. `REFERENCE`: General knowledge wikis (e.g. Wikipedia).
+11. `UNKNOWN`: Unattributed or unrecognized domains.
+
+### F. Canonical Evidence Status Model
+ResearchLens AI establishes a unified evidence status model shared identically across every view in the application:
+- `VERIFIED`: Confirmed by authoritative primary or statutory sources with high corroboration.
+- `SUPPORTED`: Substantiated by reliable secondary sources, but below the statutory threshold.
+- `CONFLICTING`: Two or more substantive, contradictory factual claims remain unresolved.
+- `INSUFFICIENT_EVIDENCE`: A search was conducted, but reliable evidence was not disclosed. Value is `null`, confidence is `null`.
+- `MISSING`: A mandatory field required by the Research Contract has not yet been retrieved.
+- `UNVERIFIED`: Extracted candidate claim that has not completed adversarial verification.
+
+### G. Distinguishing Mutual Absence vs Genuine Contradiction
+When the Explorer finds no information on an attribute (e.g. *"Tuition fee unavailable"*) and the Investigator confirms the absence (e.g. *"No official fee table in public gazette"*), ResearchLens AI classifies this as `NO_COMPARABLE_EVIDENCE` / `AGREEMENT_ON_ABSENCE`, **never as a conflict**. Real conflicts are declared only when opposing, substantive factual values contradict (e.g. $94\%$ placement vs $81\%$ placement).
+
+### H. Deterministic Quality Gate & Research Repair Loop
+Prior to Final Synthesis, the platform executes a deterministic Quality Gate:
+1. Are all required comparison entities present?
+2. Has candidate discovery satisfied the minimum candidate threshold ($\ge 3$)?
+3. Have identical required fields been attempted across all entities?
+4. Did accepted sources pass the relevance threshold?
+
+If the Quality Gate fails, the **Research Repair Planner** dynamically reformulates targeted search queries to resolve specific missing fields or candidates. Repair rounds are strictly bounded ($\le 3$ iterations) to prevent infinite loops. If evidence remains missing after maximum rounds, the synthesis explicitly reports the unverified gaps.
+
+---
+
+## 4. Multi-Agent Team & Model Assignments
+
+ResearchLens AI assigns specialized roles to Groq's high-speed inference engine (`openai/gpt-oss-120b`):
+
+| Agent Role | Responsibility | Temperature | Primary Output |
 | :--- | :--- | :--- | :--- |
-| **Planner Agent** | Groq `llama-3.1-8b-instant` | `0.15` | Intent classification, NER, slot definition, and dual-vector search query generation. |
-| **Explorer Agent** | Groq `llama-3.3-70b-versatile` | `0.30` | Broad evidence retrieval, entity discovery, claim extraction, and source snippet mapping. |
-| **Investigator Agent** | Groq `llama-3.3-70b-versatile` | `0.15` | Adversarial cross-examination, regulatory checks, and contradiction detection. |
-| **Arbiter Agent** | Groq `llama-3.3-70b-versatile` | `0.10` | Evidence hierarchy adjudication, conflict resolution, and calibrated confidence scoring. |
-| **Synthesis Agent** | Groq `llama-3.3-70b-versatile` | `0.25` | Multi-document summarization, executive briefing, and dynamic dashboard schema generation. |
-| **Ask Dataset Agent** | Groq `llama-3.1-8b-instant` | `0.10` | Closed-world question answering strictly bounded by verified session records. |
+| **Research Planner** | Intent classification, contract generation, query decomposition | `0.15` | `ResearchContract` |
+| **Candidate Discovery** | Surfaces 4–8 viable candidates for ranking/discovery queries | `0.20` | `CandidateEntity[]` |
+| **Explorer Agent** | Broad discovery vector, multi-entity claim extraction | `0.20` | `DiscoveredEntity[]` (Null-safe) |
+| **Investigator Agent** | Adversarial verification, counter-evidence, regulatory audit | `0.15` | `CounterEvidence[]` |
+| **Research Arbiter** | 11-tier statutory adjudication, targeted conflict searches | `0.10` | `ArbiterBatchOutput` |
+| **Research Repair** | Dynamic query reformulation for Quality Gate failures | `0.20` | `ResearchRepairPlan` |
+| **Final Synthesis** | Executive brief, KPI cards, Recharts spec, unverified gaps | `0.20` | `DashboardSpec` |
+| **Ask the Dataset** | Closed-world question answering over in-memory dataset | `0.10` | `AskDatasetResponse` |
 
 ---
 
-## Intelligence / NLP Pipeline
+## 5. UI Views & Cross-Page Semantic Consistency
 
-ResearchLens AI implements an 11-stage NLP processing pipeline, visible interactively in the **Intelligence Pipeline** view:
+The frontend provides 7 specialized views, all deriving their numbers, badges, and statuses from one shared canonical state:
 
-1. **Natural Language Input:** Ingestion of arbitrary natural-language research questions with complex constraints.
-2. **Intent Analysis & Classification:** Semantic intent categorization (comparative benchmarking, regulatory tariff auditing, directory synthesis).
-3. **Named Entity Recognition (NER):** Extraction of organizations, hardware standards, and geographic scopes.
-4. **Query Decomposition:** Sub-goal planning transforming conversational text into orthogonal search keyword vectors.
-5. **Prompt Construction & Grounding:** Dynamic injection of scraped web passages into structured Zod JSON schemas.
-6. **Multi-Agent LLM Processing:** Concurrent dual-vector execution preventing confirmation bias.
-7. **Evidence Retrieval & Scraping:** Multi-provider search (DuckDuckGo, Wikipedia, Direct Web) with HTML noise stripping.
-8. **Claim & Fact Extraction:** Information Extraction (IE) converting passages into structured knowledge triples.
-9. **Contradiction Detection:** Natural Language Inference (NLI) detecting cross-document numerical and factual inconsistencies.
-10. **Arbitration & Adjudication:** Evidentiary authority hierarchy application and confidence calibration.
-11. **Final Synthesis & Grounded Q&A:** Multi-document summarization and closed-world semantic question answering.
+1. **Dashboard:** Executive briefing, 6 calibrated KPI cards (separating Confidence from Coverage), Recharts visualizations, dynamic evidence matrix with clickable source URLs, and CSV export.
+2. **Evidence Inspector:** Deep-dive modal into individual claims with supporting verbatim snippets, authority badges, and verification rationale.
+3. **Compare Agents:** Direct side-by-side audit of Explorer vs Investigator findings, displaying actual candidate claims and Arbiter decisions.
+4. **Sources Intelligence:** Complete inventory of evaluated sources, filterable across all 11 authority categories, displaying domain, relevance score, and acceptance status.
+5. **Provenance Graph:** Traceable chain of custody for every verified claim: $\text{Claim} \rightarrow \text{Evidence} \rightarrow \text{Source} \rightarrow \text{Agent} \rightarrow \text{Arbiter Resolution}$.
+6. **Events Feed:** Real-time chronological audit trail of all pipeline actions, relevance rejections, arbiter decisions, and quality gate evaluations.
+7. **Intelligence Pipeline:** Visual breakdown of the 11-stage NLP processing pipeline with truthful sequential vector descriptions and accurate file mappings.
 
 ---
 
-## LLM Integration
-
-ResearchLens AI connects directly to **Groq Cloud API** for ultra-fast, high-throughput inference with specialized model assignments:
-
-- **Flagship Heavyweight Inference:** `llama-3.3-70b-versatile` powers deep reasoning, adversarial cross-examination, and complex arbitration.
-- **High-Velocity Structured Output:** `llama-3.1-8b-instant` powers initial research planning and low-latency closed-world Q&A.
-- **API Resilience:** Built-in timeout controls (30s), exponential backoff retry logic, rate-limit resilience (HTTP 429), and JSON code-fence sanitization.
-- **Server-Side Security:** All Groq API calls execute exclusively in the Node.js backend (`src/services/groqClient.ts`). API keys are never bundled into client-side JavaScript.
-
----
-
-## Prompt Architecture
-
-All prompts are decoupled into dedicated TypeScript modules within `src/prompts/` and documented in detail in [`PROMPTS.md`](PROMPTS.md):
-
-- `src/prompts/plannerPrompt.ts`: NER, intent extraction, search strategy generation.
-- `src/prompts/explorerPrompt.ts`: Entity discovery, claim extraction, verbatim snippet quotation.
-- `src/prompts/investigatorPrompt.ts`: Adversarial cross-examination, regulatory checks, conflict discovery.
-- `src/prompts/arbiterPrompt.ts`: Statutory hierarchy adjudication, calibrated confidence scoring.
-- `src/prompts/finalSynthesisPrompt.ts`: Executive briefing and dynamic dashboard specification.
-- `src/prompts/datasetPrompt.ts`: Closed-world grounded retrieval Q&A.
-- `src/prompts/index.ts`: Central registry and schema export.
-
----
-
-## Evidence Verification
-
-Every candidate claim extracted from web sources is linked to verifiable metadata:
-
-- **Verbatim Text Snippet:** Exact excerpt extracted from the source document.
-- **Direct Source URL:** Clickable, authentic web reference.
-- **Source Classification:** Automatic authority categorization based on domain structure:
-  - `OFFICIAL_GOV`: Regulatory portals, gazettes, statutory commissions.
-  - `PRIMARY_COMPANY`: Official enterprise websites, investor relations, SEC/MCA filings.
-  - `ACADEMIC_INDUSTRY`: Peer-reviewed studies, technical whitepapers, accredited indices.
-  - `SECONDARY_MEDIA`: Reputable trade journals, major news publications.
-  - `AGGREGATOR`: Directories, blogs, crowdsourced review portals.
-  - `UNVERIFIED`: Low-authority or unattributed sources.
-
----
-
-## Conflict Resolution
-
-When the Explorer and Investigator agents discover conflicting values for the same entity attribute (e.g. ₹16.00/kWh in a 2022 blog post vs. ₹14.50/kWh in an official 2026 tariff order), the **Research Arbiter** applies a deterministic statutory hierarchy:
-
-$$\text{Official Gov / Statutory} \succ \text{Primary Entity Portal} \succ \text{Academic / Industry Study} \succ \text{Journalistic Publication} \succ \text{Aggregator / Directory}$$
-
-- **Resolved Conflict:** If one source holds clear statutory precedence, the conflict is resolved, the decision basis is recorded, and the higher-authority value is accepted.
-- **Unresolved Conflict (Preserved Ambiguity):** If sources hold equal authority and disagree, the platform explicitly preserves the discrepancy as `UNRESOLVED` with lowered confidence, preventing the LLM from fabricating an arbitrary consensus.
-
----
-
-## Ask the Research Dataset
-
-The **Ask Research** module provides a retrieval-grounded natural-language query interface over the current session data:
-
-- **Closed-World Constraint:** The model is strictly instructed: *"Answer using ONLY the entities and fields provided in the dataset. Do not bring in facts, numbers, or dates from outside the provided records."*
-- **Transparent Refusal:** If an inquiry asks for information not present in the verified dataset, the system explicitly states that the records contain insufficient evidence.
-- **Quick-Question Presets:**
-  - *"Which findings have the highest confidence?"*
-  - *"Show unresolved conflicts"*
-  - *"Which sources were used most?"*
-  - *"Summarize the verified findings"*
-  - *"Which claims have insufficient evidence?"*
-
----
-
-## Dashboard & Analytics
-
-The **Evidence Intelligence Dashboard** provides real-time, state-derived analytics built with **Recharts**:
-
-- **6 State-Derived KPI Cards:** Sources Analyzed, Verified Claims, Conflicting Claims, Average Confidence %, Entities Discovered, and Research Completion %.
-- **Executive Summary:** Synthesized briefing with dynamic scope badges and structured takeaways.
-- **Verification Status Distribution:** Interactive pie chart displaying Verified, Conflict, and Insufficient Evidence proportions.
-- **Confidence Distribution:** Bar chart grouping findings into calibrated confidence brackets (90-100%, 75-89%, 50-74%, <50%).
-- **Interactive Evidence Matrix:** Searchable, filterable table by entity, attribute, authority, and status with verbatim source snippets.
-- **Dedicated Conflict Analysis:** Card-by-card breakdown of opposing claims, supporting evidence, and Arbiter decisions.
-
----
-
-## System Architecture
-
-```mermaid
-graph TD
-    Client["React 19 Frontend (Vite, TailwindCSS, Lucide)"]
-    Server["Express.js Server (Port 3000)"]
-    GroqAPI["Groq Cloud API (Llama 3.3 70B & 3.1 8B)"]
-    WebSources["External Web (DuckDuckGo, Wikipedia, Cheerio)"]
-
-    Client <-->|REST API & JSON Payload| Server
-    Server -->|Prompt Builders + Schemas| GroqAPI
-    Server -->|Multi-Provider Search & Scrape| WebSources
-    GroqAPI -->|Validated Structured JSON| Server
-    Server -->|In-Memory Research State| Client
-```
-
----
-
-## Technology Stack
-
-- **Frontend:** React 19, TypeScript, Vite, TailwindCSS, Lucide Icons, Recharts, React Flow (`@xyflow/react`).
-- **Backend:** Node.js, Express, TypeScript (`tsx`).
-- **LLM Inference:** Groq Cloud SDK (`groq-sdk`), Meta Llama 3.3 70B Versatile, Meta Llama 3.1 8B Instant.
-- **Schema Validation:** Zod.
-- **Web Retrieval & Scraping:** Cheerio, native Fetch API, DuckDuckGo Instant Answer API, Wikipedia OpenSearch API.
-
----
-
-## Project Structure
-
-```
-ResearchLens-AI/
-├── .env.example                 # Environment configuration template
-├── .env.local.example           # Local environment configuration template
-├── .gitignore                   # Excludes node_modules, .env, build artifacts
-├── PROMPTS.md                   # Comprehensive prompt architecture documentation
-├── README.md                    # Project documentation & architecture overview
-├── index.html                   # Application entry point & metadata
-├── package.json                 # Dependencies & scripts
-├── tsconfig.json                # TypeScript compiler configuration
-├── vite.config.ts               # Vite bundler configuration
-├── server.ts                    # Server bootstrap & Express entry point
-├── src/
-│   ├── App.tsx                  # Main application orchestrator & views
-│   ├── main.tsx                 # React DOM mount
-│   ├── index.css                # Design system styling & Tailwind utilities
-│   ├── serverApp.ts             # Express REST API routes & orchestration
-│   ├── config/
-│   │   └── modelConfig.ts       # Centralized Groq model & temperature configuration
-│   ├── prompts/
-│   │   ├── plannerPrompt.ts     # Intent, NER & problem decomposition prompt
-│   │   ├── explorerPrompt.ts    # Broad discovery & claim extraction prompt
-│   │   ├── investigatorPrompt.ts# Adversarial verification & contradiction prompt
-│   │   ├── arbiterPrompt.ts     # Statutory hierarchy & confidence prompt
-│   │   ├── finalSynthesisPrompt.ts # Executive briefing & dashboard spec prompt
-│   │   ├── datasetPrompt.ts     # Closed-world grounded Q&A prompt
-│   │   └── index.ts             # Central prompt registry
-│   ├── services/
-│   │   ├── groqClient.ts        # Resilient Groq API client (timeouts, backoff, retry)
-│   │   ├── orchestrator.ts      # Multi-agent workflow execution engine
-│   │   ├── schemas.ts           # Zod validation schemas
-│   │   ├── webSearch.ts         # Multi-provider web search engine
-│   │   ├── scraper.ts           # Cheerio HTML parser & text extractor
-│   │   └── clientFallback.ts    # High-fidelity benchmark showcase engine
-│   ├── types/
-│   │   └── research.ts          # Unified TypeScript interfaces
-│   └── components/
-│       ├── layout/
-│       │   ├── TopBar.tsx       # Navigation header & live status
-│       │   └── Sidebar.tsx      # Query inputs, history & telemetry
-│       ├── dashboard/
-│       │   └── AdaptiveDashboard.tsx # Executive briefing, KPIs, Recharts & Ask Dataset
-│       ├── pipeline/
-│       │   └── NlpPipelineView.tsx   # 11-stage visual NLP pipeline inspector
-│       ├── sources/
-│       │   └── SourcesView.tsx  # Source authority breakdown & URL index
-│       ├── compare/
-│       │   └── CompareAgentsView.tsx # Side-by-side agent findings & reconciliation
-│       ├── graph/
-│       │   └── ResearchGraphView.tsx # React Flow agentic node graph
-│       ├── provenance/
-│       │   └── ProvenanceView.tsx    # Evidentiary chain-of-custody timeline
-│       ├── events/
-│       │   └── LiveFeed.tsx     # Real-time agent event stream
-│       └── inspector/
-│           └── EvidenceInspector.tsx # Slide-out evidence drawer
-```
-
----
-
-## Getting Started
+## 6. Installation & Local Setup
 
 ### Prerequisites
+- **Node.js**: v18.0.0 or higher (v20+ recommended)
+- **npm** or **bun**
+- **Groq Cloud API Key**: Obtain a free API key at [console.groq.com](https://console.groq.com)
 
-- **Node.js:** v18.0.0 or higher
-- **Package Manager:** `npm` (v9+)
-- **Groq API Key:** Free API key from [console.groq.com](https://console.groq.com) (optional for benchmark showcase mode)
+### Quick Start
 
----
-
-## Environment Configuration
-
-1. Copy the example environment file:
+1. **Clone the repository:**
    ```bash
-   cp .env.example .env.local
+   git clone https://github.com/ni-saantt/Research_Lens_AI.git
+   cd Research_Lens_AI
    ```
-2. Open `.env.local` and add your Groq API key:
-   ```env
-   GROQ_API_KEY=gsk_your_groq_api_key_here
-   PORT=3000
-   ```
-   > **Note:** If `GROQ_API_KEY` is omitted, ResearchLens AI automatically boots in **Showcase / Benchmark Mode**, allowing complete end-to-end exploration using verified real-world benchmark datasets without crashing.
 
----
-
-## Running Locally
-
-1. **Install Dependencies:**
+2. **Install dependencies:**
    ```bash
    npm install
    ```
 
-2. **Start Full-Stack Development Server:**
+3. **Configure environment:**
+   Create a `.env.local` file in the project root:
+   ```env
+   GROQ_API_KEY=gsk_your_groq_api_key_here
+   PORT=3000
+   ```
+
+4. **Start the development server:**
    ```bash
    npm run dev
    ```
-   The application will start on `http://localhost:3000`.
+   Open your browser and navigate to `http://localhost:3000`.
 
-3. **Verify TypeScript & Linting:**
-   ```bash
-   npm run lint
-   ```
-
-4. **Build Production Bundle:**
+5. **Build for production:**
    ```bash
    npm run build
    ```
 
 ---
 
-## Example Research Queries
+## 7. Technology Stack
 
-1. **CleanTech & Energy Infrastructure:**
-   > *"Find EV charging companies operating in Rajasthan, compare cities served, charger types, tariff pricing and official contact information, verify important claims and flag contradictions"*
-
-2. **Autonomous AI & Software Engineering:**
-   > *"Compare autonomous AI coding tools launched in 2026, verify monthly pricing, context windows, and supported models"*
-
-3. **Public Policy & Government Initiatives:**
-   > *"Investigate recent Indian government AI education initiatives and compare their official objectives, allocated budget, and launch dates"*
+- **Frontend:** React 19, TypeScript, Vite, TailwindCSS, Lucide Icons, Recharts, `@xyflow/react`.
+- **Backend:** Node.js, Express, TypeScript (`tsx`), Server-Sent Events (SSE).
+- **LLM Inference:** Groq Cloud SDK (`groq-sdk`), Meta Llama & OpenAI Flagship OSS Models.
+- **Validation:** Zod schemas enforcing strict JSON outputs.
+- **Web Retrieval & Crawling:** Cheerio HTML parser, DuckDuckGo Instant Search, Wikipedia OpenSearch API.
 
 ---
 
-## API Architecture
+## 8. License
 
-The Express server exposes clean REST endpoints:
-
-- `GET /api/status`: Returns system telemetry, Groq API availability, and active models.
-- `POST /api/research/plan`: Executes the Planner Agent to generate a research plan.
-- `POST /api/research/execute`: Runs the complete multi-agent pipeline (Planner → Explorer → Investigator → Arbiter → Synthesis) and returns verified state.
-- `POST /api/research/ask`: Executes grounded question answering over the active session dataset.
-
----
-
-## Security
-
-- **Zero Client-Side Secrets:** API keys are never bundled into client JavaScript. All LLM calls execute server-side in `src/serverApp.ts`.
-- **Git Protection:** `.env` and `.env.local` are strictly excluded via `.gitignore`.
-- **Anti-Scraping Compliance:** Web scraper includes an explicit User-Agent (`ResearchLens-AIBot/1.0`), strict 5-second fetch timeouts, and ignores binary payloads.
-- **Truthful Error Handling:** Rate limits (HTTP 429) and network timeouts display honest diagnostic messages rather than silently faking responses.
-
----
-
-## Limitations
-
-- **Search Engine Coverage:** Without a paid Enterprise Search API key, live web discovery uses multi-strategy search cascades (DuckDuckGo, Wikipedia, Direct Web Index).
-- **Dynamic JavaScript SPAs:** The server-side scraper uses Cheerio for fast static HTML extraction. Pages requiring heavy client-side JavaScript rendering provide limited text compared to static SSR pages.
-- **Multi-Modal Content:** Current pipeline focuses on textual evidence. Future iterations will support PDF extraction and OCR for tabular data.
-
----
-
-## Roadmap
-
-- [ ] **Multi-Modal Document Ingestion:** Native extraction for PDF whitepapers, financial statements, and regulatory gazettes.
-- [ ] **Enterprise Search Integration:** Direct connectors for Google Custom Search, Tavily, and Brave Search APIs.
-- [ ] **Export Formats:** Automated PDF research report and executive summary generation.
-- [ ] **Collaborative Workspaces:** Multi-user shared research sessions and team verification workflows.
-
----
-
-## Developer
-
-**ResearchLens AI** is designed, developed, and maintained by:
-
-- **Developer / Project Owner:** Nishant Choudhary
-- **Project:** ResearchLens AI — Multi-Agent Research & Evidence Intelligence Platform
+Developed by **Nishant Choudhary**. Distributed under the MIT License.

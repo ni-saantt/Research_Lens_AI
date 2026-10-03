@@ -46,6 +46,7 @@ import {
   Info
 } from 'lucide-react';
 import { ResearchState, DiscoveredEntity, ConflictItem } from '../../types/research';
+import { computeCanonicalMetrics, getStatusBadgeConfig } from '../../utils/statusHelpers';
 
 interface AdaptiveDashboardProps {
   state: ResearchState;
@@ -70,32 +71,12 @@ export function AdaptiveDashboard({ state, onSelectCell }: AdaptiveDashboardProp
   const sources = state.sources;
   const claims = state.claims;
 
-  // 1. Compute Authentic Dashboard KPIs directly from state (No random numbers)
+  // 1. Compute Authentic Canonical KPIs directly from state (Separating Confidence from Coverage from Completeness)
+  const canonicalMetrics = useMemo(() => computeCanonicalMetrics(entities), [entities]);
   const totalEntities = entities.length;
   const totalSources = sources.length;
   const totalConflicts = conflicts.length;
   const resolvedConflicts = conflicts.filter(c => c.resolutionStatus === 'RESOLVED').length;
-  
-  // Total verified fields count
-  let totalFieldsCount = 0;
-  let verifiedFieldsCount = 0;
-  let totalConfidenceSum = 0;
-
-  entities.forEach(ent => {
-    Object.values(ent.fields).forEach(f => {
-      totalFieldsCount++;
-      if (f.verifiedStatus === 'VERIFIED') verifiedFieldsCount++;
-      totalConfidenceSum += f.evidenceStrength;
-    });
-  });
-
-  const averageConfidence = totalFieldsCount > 0 
-    ? Math.round(totalConfidenceSum / totalFieldsCount) 
-    : (entities.length > 0 ? 88 : 0);
-
-  const averageCoverage = totalEntities > 0
-    ? Math.round(entities.reduce((acc, e) => acc + (e.evidenceCoverage || 0), 0) / totalEntities)
-    : 0;
 
   // 2. Verification Status Distribution Chart Data
   const verificationDistributionData = useMemo(() => {
@@ -172,7 +153,8 @@ export function AdaptiveDashboard({ state, onSelectCell }: AdaptiveDashboardProp
     
     const rows = entities.map(e => {
       const fieldValues = allFieldKeys.map(k => {
-        const val = e.fields[k]?.value || 'NOT_FOUND';
+        const f = e.fields[k];
+        const val = f && f.value !== null ? String(f.value) : 'INSUFFICIENT_EVIDENCE';
         return `"${val.replace(/"/g, '""')}"`;
       });
       return [`"${e.name}"`, `"${e.location || ''}"`, `"${e.overallStatus}"`, `"${e.evidenceCoverage}%"`, ...fieldValues].join(',');
@@ -281,39 +263,41 @@ export function AdaptiveDashboard({ state, onSelectCell }: AdaptiveDashboardProp
         {/* 2. Six Real KPI Cards (Directly from State) */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-4">
           <div className="p-3 rounded-lg bg-neutral-950/70 border border-neutral-800/80">
-            <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 block truncate">Sources Analyzed</span>
+            <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 block truncate" title="Total web domains audited">Sources Analyzed</span>
             <div className="text-xl font-bold font-mono text-cyan-400 mt-1 tabular-nums">{totalSources}</div>
             <span className="text-[10px] text-neutral-500 block truncate">Audited web portals</span>
           </div>
 
           <div className="p-3 rounded-lg bg-neutral-950/70 border border-neutral-800/80">
-            <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 block truncate">Entities Verified</span>
+            <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 block truncate" title="Candidate entities investigated in current session">Entities Evaluated</span>
             <div className="text-xl font-bold font-mono text-neutral-100 mt-1 tabular-nums">{totalEntities}</div>
-            <span className="text-[10px] text-neutral-500 block truncate">Structured records</span>
+            <span className="text-[10px] text-neutral-500 block truncate">Audited candidates</span>
           </div>
 
           <div className="p-3 rounded-lg bg-neutral-950/70 border border-neutral-800/80">
-            <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 block truncate">Verified Claims</span>
-            <div className="text-xl font-bold font-mono text-emerald-400 mt-1 tabular-nums">{verifiedFieldsCount || claims.length}</div>
-            <span className="text-[10px] text-neutral-500 block truncate">Primary corroborated</span>
+            <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 block truncate" title="Fields substantiated by primary or regulatory authority sources">Verified Claims</span>
+            <div className="text-xl font-bold font-mono text-emerald-400 mt-1 tabular-nums">{canonicalMetrics.verifiedCount}</div>
+            <span className="text-[10px] text-neutral-500 block truncate">{canonicalMetrics.supportedCount} supported</span>
           </div>
 
           <div className="p-3 rounded-lg bg-neutral-950/70 border border-neutral-800/80">
-            <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 block truncate">Conflicts Audited</span>
+            <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 block truncate" title="Substantive factual discrepancies adjudicated by Arbiter">Conflicts Audited</span>
             <div className="text-xl font-bold font-mono text-rose-400 mt-1 tabular-nums">{totalConflicts}</div>
-            <span className="text-[10px] text-neutral-500 block truncate">{resolvedConflicts} adjudicated</span>
+            <span className="text-[10px] text-neutral-500 block truncate">{resolvedConflicts} resolved • {totalConflicts - resolvedConflicts} preserved</span>
           </div>
 
-          <div className="p-3 rounded-lg bg-neutral-950/70 border border-neutral-800/80">
-            <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 block truncate">Avg Confidence</span>
-            <div className="text-xl font-bold font-mono text-indigo-400 mt-1 tabular-nums">{averageConfidence}%</div>
-            <span className="text-[10px] text-neutral-500 block truncate">Calibrated scale</span>
+          <div className="p-3 rounded-lg bg-neutral-950/70 border border-neutral-800/80" title="Average authority strength of verified claims only. Missing values do not inflate confidence score.">
+            <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 block truncate">Verified Confidence</span>
+            <div className="text-xl font-bold font-mono text-indigo-400 mt-1 tabular-nums">
+              {canonicalMetrics.averageConfidence !== null ? `${canonicalMetrics.averageConfidence}%` : 'N/A'}
+            </div>
+            <span className="text-[10px] text-neutral-500 block truncate">Excludes missing fields</span>
           </div>
 
-          <div className="p-3 rounded-lg bg-neutral-950/70 border border-neutral-800/80">
+          <div className="p-3 rounded-lg bg-neutral-950/70 border border-neutral-800/80" title="Percentage of required criteria substantiated with evidence across candidates. Coverage ≠ Confidence.">
             <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 block truncate">Evidence Coverage</span>
-            <div className="text-xl font-bold font-mono text-teal-400 mt-1 tabular-nums">{averageCoverage}%</div>
-            <span className="text-[10px] text-neutral-500 block truncate">Field completeness</span>
+            <div className="text-xl font-bold font-mono text-teal-400 mt-1 tabular-nums">{canonicalMetrics.evidenceCoverage}%</div>
+            <span className="text-[10px] text-neutral-500 block truncate">Completeness: {canonicalMetrics.researchCompleteness}%</span>
           </div>
         </div>
       </div>
@@ -658,9 +642,21 @@ export function AdaptiveDashboard({ state, onSelectCell }: AdaptiveDashboardProp
                       >
                         {f ? (
                           <div className="flex items-center gap-1.5">
-                            <span className="truncate max-w-[200px]">{f.value}</span>
-                            {f.verifiedStatus === 'VERIFIED' && (
-                              <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+                            {f.value !== null ? (
+                              <>
+                                <span className="truncate max-w-[200px] text-neutral-100">{f.value}</span>
+                                {f.verifiedStatus === 'VERIFIED' && (
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+                                )}
+                                {f.verifiedStatus === 'SUPPORTED' && (
+                                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 shrink-0" title="Supported by web evidence" />
+                                )}
+                                {f.verifiedStatus === 'CONFLICTING' && (
+                                  <AlertTriangle className="w-3 h-3 text-rose-400 shrink-0" />
+                                )}
+                              </>
+                            ) : (
+                              <span className="text-amber-400 font-mono text-[11px] italic">[Insufficient Evidence]</span>
                             )}
                           </div>
                         ) : (

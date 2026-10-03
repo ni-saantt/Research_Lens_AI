@@ -9,6 +9,54 @@
  */
 import { z } from 'zod';
 
+export const ResearchContractSchema = z.object({
+  intent: z.enum([
+    'FACT_LOOKUP',
+    'COMPARISON',
+    'RANKING',
+    'RECOMMENDATION',
+    'DISCOVERY',
+    'EXPLORATORY_RESEARCH',
+    'FACT_CHECK',
+    'CURRENT_INFORMATION',
+    'POLICY_OR_REGULATORY',
+    'MULTI_ENTITY_ANALYSIS'
+  ]).or(z.string()).transform(val => {
+    const valid = [
+      'FACT_LOOKUP', 'COMPARISON', 'RANKING', 'RECOMMENDATION',
+      'DISCOVERY', 'EXPLORATORY_RESEARCH', 'FACT_CHECK',
+      'CURRENT_INFORMATION', 'POLICY_OR_REGULATORY', 'MULTI_ENTITY_ANALYSIS'
+    ];
+    return valid.includes(val) ? (val as any) : 'EXPLORATORY_RESEARCH';
+  }),
+  topic: z.string(),
+  scope: z.object({
+    geography: z.string().optional().default('Global / As specified'),
+    domain: z.string().optional().default('General'),
+    timeframe: z.string().optional().default('Current'),
+  }).optional().default({ geography: 'Global / As specified', domain: 'General', timeframe: 'Current' }),
+  candidateDiscoveryRequired: z.boolean().default(false),
+  targetCandidateCount: z.number().int().min(1).max(10).default(3),
+  requiredEntities: z.array(z.string()).default([]),
+  requiredFields: z.array(z.string()).min(2),
+  minimumRelevantSourcesPerEntity: z.number().int().min(1).default(2),
+  preferredSourceTypes: z.array(z.string()).default([]),
+  freshnessRequirement: z.string().default('Current'),
+  maximumResearchRounds: z.number().int().min(1).max(5).default(3),
+});
+
+export const CandidateDiscoveryOutputSchema = z.object({
+  searchQueriesUsed: z.array(z.any()).default([]).transform(items => items.map(i => String(i))),
+  candidates: z.array(z.any()).default([]).transform(items => items.map(item => ({
+    name: String(item?.name || item?.entityName || 'Candidate Entity'),
+    category: String(item?.category || 'General Entity'),
+    location: item?.location ? String(item.location) : undefined,
+    briefRationale: String(item?.briefRationale || item?.rationale || 'Surfaced from broad candidate search'),
+    initialSourceUrl: item?.initialSourceUrl ? String(item.initialSourceUrl) : undefined,
+  }))),
+  summary: z.string().optional().default('Candidate discovery completed.'),
+});
+
 export const ResearchPlanSchema = z.object({
   objective: z.string().min(5),
   targetEntitiesDescription: z.string(),
@@ -24,28 +72,66 @@ export const ResearchPlanSchema = z.object({
   expectedOutputFormat: z.string().optional().default('Structured Entities Matrix'),
   potentialResearchRisks: z.array(z.string()).optional().default([]),
   confidenceThreshold: z.number().min(0).max(1).default(0.8),
+  contract: ResearchContractSchema.optional(),
 });
+
+function sanitizeClaimValue(rawVal: any): string | null {
+  if (rawVal === null || rawVal === undefined) return null;
+  const s = String(rawVal).trim();
+  const lower = s.toLowerCase();
+  if (
+    lower === '' ||
+    lower === 'null' ||
+    lower === 'undefined' ||
+    lower === 'not disclosed' ||
+    lower === 'not disclosed in source' ||
+    lower === 'not available' ||
+    lower === 'unavailable' ||
+    lower === 'none' ||
+    lower === 'n/a' ||
+    lower === 'no data' ||
+    lower === 'not found' ||
+    lower === 'insufficient evidence'
+  ) {
+    return null;
+  }
+  return s;
+}
 
 export const ExplorerOutputSchema = z.object({
   searchQueriesUsed: z.array(z.any()).default([]).transform(items => items.map(i => String(i))),
   discoveredEntities: z.array(z.any()).default([]).transform(items => items.map(item => {
-    const fieldsObj: Record<string, { value: string; sourceUrl: string; sourceTitle: string; supportingSnippet: string }> = {};
+    const fieldsObj: Record<string, { value: string | null; sourceUrl: string; sourceTitle: string; supportingSnippet: string; isMissing?: boolean }> = {};
     if (item?.fields && typeof item.fields === 'object') {
       for (const [k, v] of Object.entries(item.fields)) {
         if (v && typeof v === 'object') {
           const valObj = v as any;
+          const cleanVal = sanitizeClaimValue(valObj.value);
           fieldsObj[k] = {
-            value: String(valObj.value ?? 'Disclosed in evidence'),
+            value: cleanVal,
             sourceUrl: String(valObj.sourceUrl || 'https://web.archive.org/source'),
             sourceTitle: String(valObj.sourceTitle || 'Web Source Reference'),
-            supportingSnippet: String(valObj.supportingSnippet || 'Extracted from verified public web record'),
+            supportingSnippet: cleanVal 
+              ? String(valObj.supportingSnippet || 'Extracted from verified public web record')
+              : 'No authoritative evidence located for this field in public source records',
+            isMissing: cleanVal === null,
           };
         } else if (v !== null && v !== undefined) {
+          const cleanVal = sanitizeClaimValue(v);
           fieldsObj[k] = {
-            value: String(v),
+            value: cleanVal,
             sourceUrl: 'https://web.archive.org/source',
             sourceTitle: 'Web Source Reference',
-            supportingSnippet: 'Extracted from verified public web record',
+            supportingSnippet: cleanVal ? 'Extracted from verified public web record' : 'No authoritative evidence located',
+            isMissing: cleanVal === null,
+          };
+        } else {
+          fieldsObj[k] = {
+            value: null,
+            sourceUrl: 'https://web.archive.org/source',
+            sourceTitle: 'Web Source Reference',
+            supportingSnippet: 'No authoritative evidence located for this field',
+            isMissing: true,
           };
         }
       }
@@ -62,25 +148,32 @@ export const ExplorerOutputSchema = z.object({
 
 export const InvestigatorOutputSchema = z.object({
   searchQueriesUsed: z.array(z.any()).default([]).transform(items => items.map(i => String(i))),
-  counterEvidenceOrChallenges: z.array(z.any()).default([]).transform(items => items.map(item => ({
-    entityName: String(item?.entityName || item?.entity || 'Discovered Entity'),
-    fieldName: String(item?.fieldName || item?.field || 'Feature / Metric'),
-    challengedValue: item?.challengedValue !== undefined && item?.challengedValue !== null ? String(item.challengedValue) : undefined,
-    primaryEvidenceValue: String(item?.primaryEvidenceValue || item?.value || 'Verified finding'),
-    primarySourceUrl: String(item?.primarySourceUrl || item?.url || 'https://official.gov/evidence'),
-    primarySourceTitle: String(item?.primarySourceTitle || item?.title || 'Official Authority Filing'),
-    reasonForDoubtOrConflict: String(item?.reasonForDoubtOrConflict || item?.reason || 'Discrepancy identified in primary source audit'),
-    isOutdated: Boolean(item?.isOutdated),
-    supportingSnippet: String(item?.supportingSnippet || item?.snippet || 'Official record excerpt'),
-  }))),
-  verifiedConfirmations: z.array(z.any()).default([]).transform(items => items.map(item => ({
-    entityName: String(item?.entityName || item?.entity || 'Discovered Entity'),
-    fieldName: String(item?.fieldName || item?.field || 'Feature / Metric'),
-    confirmedValue: String(item?.confirmedValue || item?.value || 'Confirmed metric'),
-    officialSourceUrl: String(item?.officialSourceUrl || item?.url || 'https://official.gov/record'),
-    officialSourceTitle: String(item?.officialSourceTitle || item?.title || 'Primary Authority Verification'),
-    supportingSnippet: String(item?.supportingSnippet || item?.snippet || 'Corroborated by primary web record'),
-  }))),
+  counterEvidenceOrChallenges: z.array(z.any()).default([]).transform(items => items.map(item => {
+    const primaryVal = sanitizeClaimValue(item?.primaryEvidenceValue || item?.value);
+    const challengedVal = sanitizeClaimValue(item?.challengedValue);
+    return {
+      entityName: String(item?.entityName || item?.entity || 'Discovered Entity'),
+      fieldName: String(item?.fieldName || item?.field || 'Feature / Metric'),
+      challengedValue: challengedVal ?? undefined,
+      primaryEvidenceValue: primaryVal ?? 'Unverified after primary source audit',
+      primarySourceUrl: String(item?.primarySourceUrl || item?.url || 'https://official.gov/evidence'),
+      primarySourceTitle: String(item?.primarySourceTitle || item?.title || 'Official Authority Filing'),
+      reasonForDoubtOrConflict: String(item?.reasonForDoubtOrConflict || item?.reason || 'Discrepancy identified in primary source audit'),
+      isOutdated: Boolean(item?.isOutdated),
+      supportingSnippet: String(item?.supportingSnippet || item?.snippet || 'Official record excerpt'),
+    };
+  })),
+  verifiedConfirmations: z.array(z.any()).default([]).transform(items => items.map(item => {
+    const confVal = sanitizeClaimValue(item?.confirmedValue || item?.value);
+    return {
+      entityName: String(item?.entityName || item?.entity || 'Discovered Entity'),
+      fieldName: String(item?.fieldName || item?.field || 'Feature / Metric'),
+      confirmedValue: confVal,
+      officialSourceUrl: String(item?.officialSourceUrl || item?.url || 'https://official.gov/source'),
+      officialSourceTitle: String(item?.officialSourceTitle || item?.title || 'Primary Authority Verification'),
+      supportingSnippet: String(item?.supportingSnippet || item?.snippet || 'Corroborated by primary web record'),
+    };
+  })),
   missingFieldsIdentified: z.array(z.any()).default([]).transform(items => items.map(item => {
     if (typeof item === 'string') {
       return { entityName: 'Target Entity', missingField: item, reasonNotDisclosed: 'Not disclosed in public filings' };
@@ -112,8 +205,8 @@ export const ArbiterDecisionSchema = z.object({
     }
     return 'CONSENSUS';
   }),
-  resolvedValue: z.any().transform(v => (v !== null && v !== undefined && String(v).trim() !== '' ? String(v) : 'Unresolved pending primary source disclosure')),
-  confidenceScore: z.number().min(0).max(1).default(0.85),
+  resolvedValue: z.any().transform(v => sanitizeClaimValue(v)),
+  confidenceScore: z.number().nullable().optional().transform(v => (typeof v === 'number' ? Math.max(0, Math.min(1, v)) : null)),
   decisionBasis: z.string().nullable().optional().transform(v => v ?? 'Adjudicated under statutory evidence hierarchy'),
   freshnessPreferenceApplied: z.boolean().optional().default(true),
   primarySourcePreferenceApplied: z.boolean().optional().default(true),
@@ -126,12 +219,14 @@ export const ArbiterBatchOutputSchema = z.object({
     const rawRes = item?.resolution;
     const resolution: 'CONSENSUS' | 'EXPLORER_SELECTED' | 'INVESTIGATOR_SELECTED' | 'UNRESOLVED' =
       (['CONSENSUS', 'EXPLORER_SELECTED', 'INVESTIGATOR_SELECTED', 'UNRESOLVED'].includes(rawRes) ? rawRes : 'CONSENSUS');
+    const cleanVal = sanitizeClaimValue(item?.resolvedValue);
+    const confScore = cleanVal === null ? null : (typeof item?.confidenceScore === 'number' ? Math.max(0, Math.min(1, item.confidenceScore)) : 0.85);
     return {
       entityName: String(item?.entityName || item?.entity || 'Target Entity'),
       fieldName: String(item?.fieldName || item?.field || 'Target Field'),
       resolution,
-      resolvedValue: (item?.resolvedValue !== null && item?.resolvedValue !== undefined && String(item.resolvedValue).trim() !== '') ? String(item.resolvedValue) : 'Unresolved pending primary source disclosure',
-      confidenceScore: typeof item?.confidenceScore === 'number' ? Math.max(0, Math.min(1, item.confidenceScore)) : 0.85,
+      resolvedValue: cleanVal,
+      confidenceScore: confScore,
       decisionBasis: String(item?.decisionBasis || item?.basis || 'Adjudicated under statutory evidence hierarchy'),
       freshnessPreferenceApplied: Boolean(item?.freshnessPreferenceApplied ?? true),
       primarySourcePreferenceApplied: Boolean(item?.primarySourcePreferenceApplied ?? true),
@@ -188,6 +283,19 @@ export const DashboardSpecSchema = z.object({
     })
   ).default([]),
   unverifiedObservations: z.array(z.string()).default([]),
+});
+
+export const ResearchRepairPlanSchema = z.object({
+  needsRepair: z.boolean(),
+  repairRound: z.number().default(1),
+  reasons: z.array(z.string()).default([]),
+  targetedQueries: z.array(z.string()).default([]),
+  missingEntities: z.array(z.string()).default([]),
+  missingFields: z.array(z.object({
+    entityName: z.string(),
+    fieldName: z.string(),
+    suggestedQuery: z.string(),
+  })).default([]),
 });
 
 export const AskDatasetResponseSchema = z.object({

@@ -60,29 +60,29 @@ export function ProvenanceView({ state, onSelectEvidence }: ProvenanceViewProps)
     },
     {
       step: 3,
-      title: 'Parallel Dual-Agent Web Dispatch',
+      title: 'Sequential Dual-Vector Agent Execution',
       icon: <Search className="w-4 h-4 text-indigo-400" />,
       content: (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
           <div className="p-2.5 rounded-lg bg-cyan-950/30 border border-cyan-900/40">
             <span className="text-[10px] font-mono uppercase text-cyan-400 font-semibold block mb-1">
-              Explorer Agent (Discovery Vector)
+              Phase A: Explorer Agent (Discovery Vector)
             </span>
             <p className="text-[11px] text-neutral-400">
-              Queried broad directories and regional lists. Discovered candidate entities and raw company portals.
+              Surfaces candidate entities, parses initial web directory records, and extracts candidate claims with authentic web snippets.
             </p>
           </div>
           <div className="p-2.5 rounded-lg bg-indigo-950/30 border border-indigo-900/40">
             <span className="text-[10px] font-mono uppercase text-indigo-400 font-semibold block mb-1">
-              Investigator Agent (Adversarial Vector)
+              Phase B: Investigator Agent (Adversarial Vector)
             </span>
             <p className="text-[11px] text-neutral-400">
-              Cross-referenced state nodal gazettes, regulatory orders, and checked for stale third-party pricing claims.
+              Receives Explorer candidates and cross-examines findings against statutory orders, official gazettes, and primary documentation.
             </p>
           </div>
         </div>
       ),
-      count: '2 Simultaneous Agents',
+      count: '2 Sequential Vectors',
     },
     {
       step: 4,
@@ -96,7 +96,7 @@ export function ProvenanceView({ state, onSelectEvidence }: ProvenanceViewProps)
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {state.sources.slice(0, 4).map((src) => (
               <div 
-                key={src.id}
+                key={src.id} 
                 onClick={() => onSelectEvidence({ type: 'source', source: src })}
                 className="p-2 rounded bg-neutral-950 border border-neutral-800 hover:border-cyan-500/50 cursor-pointer transition-colors"
               >
@@ -129,7 +129,9 @@ export function ProvenanceView({ state, onSelectEvidence }: ProvenanceViewProps)
             >
               <div className="flex items-center justify-between font-mono text-[10px] text-amber-400 mb-1">
                 <span>{c.entityName} · {c.fieldName}</span>
-                <span className="text-emerald-400">RESOLVED</span>
+                <span className={c.resolutionStatus === 'RESOLVED' ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold'}>
+                  {c.resolutionStatus}
+                </span>
               </div>
               <div className="text-neutral-200 text-[11px]">
                 Basis: <span className="text-neutral-400">{c.decisionBasis}</span>
@@ -138,7 +140,7 @@ export function ProvenanceView({ state, onSelectEvidence }: ProvenanceViewProps)
           ))}
         </div>
       ),
-      count: `${state.conflicts.length} Conflicts Reconciled`,
+      count: `${state.conflicts.length} Discrepancies Audited`,
     },
     {
       step: 6,

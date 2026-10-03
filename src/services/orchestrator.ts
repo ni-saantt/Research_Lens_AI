@@ -1,13 +1,17 @@
 /**
  * ResearchLens AI - Agentic Research Orchestrator
- * Multi-Agent NLP Research & Evidence Verification System
+ * Multi-Agent Research & Evidence Intelligence Platform
  * Developer: Nishant Choudhary
  * 
  * Pipeline:
- * USER REQUEST -> PLANNER -> EXPLORER & INVESTIGATOR (Parallel) -> CONFLICT DETECTION -> ARBITER (with ESCALATION) -> FINAL SYNTHESIS
+ * USER REQUEST -> PLANNER (Intent & Contract) -> CANDIDATE DISCOVERY (for Rankings/Directories)
+ * -> EXPLORER AGENT (Discovery Vector) -> SOURCE RELEVANCE GATE
+ * -> INVESTIGATOR AGENT (Sequential Adversarial Vector) -> CONTRADICTION & CONFLICT AUDIT
+ * -> RESEARCH ARBITER -> QUALITY GATE -> RESEARCH REPAIR LOOP (Self-Correction) -> FINAL SYNTHESIS
  */
 import { 
   ResearchPlan, 
+  ResearchContract,
   DiscoveredSource, 
   ExtractedClaim, 
   DiscoveredEntity, 
@@ -17,27 +21,37 @@ import {
   ResearchEventType,
   SourceAuthority,
   ArbiterResolution,
-  ClaimVerificationStatus
+  ClaimVerificationStatus,
+  QualityGateResult,
+  CandidateEntity,
+  ResearchStats
 } from '../types/research';
 import { 
   ResearchPlanSchema, 
+  CandidateDiscoveryOutputSchema,
   ExplorerOutputSchema, 
   InvestigatorOutputSchema, 
   ArbiterBatchOutputSchema, 
-  DashboardSpecSchema 
+  DashboardSpecSchema,
+  ResearchRepairPlanSchema
 } from './schemas';
 import { callGroqStructured, isGroqConfigured, MODEL_CONFIG } from './groqClient';
-import { searchLiveWeb, buildSourceFromSearch } from './webSearch';
+import { searchLiveWeb, buildSourceFromSearch, validateSourceRelevance } from './webSearch';
 import { scrapeUrl, classifyAuthority } from './scraper';
+import { computeCanonicalMetrics } from '../utils/statusHelpers';
 import {
   buildPlannerSystemPrompt,
   buildPlannerUserPrompt,
+  buildCandidateDiscoverySystemPrompt,
+  buildCandidateDiscoveryUserPrompt,
   buildExplorerSystemPrompt,
   buildExplorerUserPrompt,
   buildInvestigatorSystemPrompt,
   buildInvestigatorUserPrompt,
   buildArbiterSystemPrompt,
   buildArbiterUserPrompt,
+  buildResearchRepairSystemPrompt,
+  buildResearchRepairUserPrompt,
   buildFinalSynthesisSystemPrompt,
   buildFinalSynthesisUserPrompt,
 } from '../prompts';
@@ -50,7 +64,7 @@ export class ResearchOrchestrator {
   private isCancelled = false;
 
   constructor(sessionId: string, onEvent: EventCallback) {
-    this.sessionId = sessionId;
+    this.sessionId = sessionId || `research_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     this.onEvent = onEvent;
   }
 
@@ -85,6 +99,7 @@ export class ResearchOrchestrator {
     conflicts: ConflictItem[];
     dashboardSpec: DashboardSpec;
     isDemoMode: boolean;
+    qualityGate?: QualityGateResult;
   }> {
     const hasGroq = isGroqConfigured();
 
@@ -100,43 +115,115 @@ export class ResearchOrchestrator {
 
     try {
       // ==========================================
-      // STAGE 1: PLANNER (ResearchLens AI NLP Deconstruction)
+      // STAGE 1: PLANNER & RESEARCH CONTRACT
       // ==========================================
-      this.emit('planner_started', `Analyzing user query: "${userQuery}" via NLP Intent & Entity Extraction`, 'planner');
+      this.emit('planner_started', `Analyzing inquiry "${userQuery}" via Semantic Intent Classification & Contract Formulation`, 'planner');
 
       const planSystemPrompt = buildPlannerSystemPrompt();
       const planUserPrompt = buildPlannerUserPrompt({ userQuery });
 
-      const { data: plan } = await callGroqStructured({
+      const { data: rawPlan } = await callGroqStructured({
         systemPrompt: planSystemPrompt,
         userPrompt: planUserPrompt,
         schema: ResearchPlanSchema,
         agentRole: 'planner',
       });
 
-      this.emit('planner_completed', `Plan finalized: Target scope "${plan.geographyScope}", tracking [${plan.requiredFields.join(', ')}] with ${plan.confidenceThreshold * 100}% confidence threshold`, 'planner', { plan });
+      // Construct verified research contract
+      const contract: ResearchContract = rawPlan.contract || {
+        intent: this.inferIntent(userQuery),
+        topic: rawPlan.objective,
+        scope: { geography: rawPlan.geographyScope, domain: 'General', timeframe: rawPlan.freshnessRequirements },
+        candidateDiscoveryRequired: this.inferCandidateDiscoveryRequired(userQuery),
+        targetCandidateCount: this.inferTargetCandidateCount(userQuery),
+        requiredEntities: this.extractRequiredEntities(userQuery),
+        requiredFields: rawPlan.requiredFields,
+        minimumRelevantSourcesPerEntity: 2,
+        preferredSourceTypes: ['PRIMARY_ENTITY', 'REGULATOR', 'GOVERNMENT_STATUTORY'],
+        freshnessRequirement: rawPlan.freshnessRequirements || 'Current',
+        maximumResearchRounds: 3,
+      };
 
+      const plan: ResearchPlan = {
+        ...rawPlan,
+        contract,
+      };
+
+      this.emit(
+        'planner_completed', 
+        `Research Contract locked [Intent: ${contract.intent}]: Tracking [${plan.requiredFields.join(', ')}] across ${contract.requiredEntities.length > 0 ? contract.requiredEntities.join(' vs ') : (contract.candidateDiscoveryRequired ? `Multi-Candidate (${contract.targetCandidateCount} targets)` : 'Target Scope')}`,
+        'planner', 
+        { plan, contract }
+      );
+
+      // Local session stores - completely isolated to this execution
       const allSources: DiscoveredSource[] = [];
-      const allClaims: ExtractedClaim[] = [];
+      const rejectedSources: DiscoveredSource[] = [];
       const sourcesMap = new Map<string, DiscoveredSource>();
+      const allClaims: ExtractedClaim[] = [];
+      let candidateEntities: CandidateEntity[] = [];
 
       // ==========================================
-      // STAGE 2: EXPLORER AGENT (Discovery Vector)
+      // STAGE 2: CANDIDATE DISCOVERY PHASE (if needed)
       // ==========================================
-      this.emit('agent_started', 'Launching Explorer Agent (Discovery Vector) to surface candidate entities and claims', 'explorer');
+      if (contract.candidateDiscoveryRequired) {
+        this.emit('agent_started', `Initiating Candidate Discovery Phase: Surfacing 4 to 8 viable candidates for "${userQuery}"`, 'explorer');
 
-      const explorerResult = await this.runExplorerAgent(userQuery, plan, (src) => {
-        if (!sourcesMap.has(src.url)) {
-          sourcesMap.set(src.url, src);
-          allSources.push(src);
+        candidateEntities = await this.runCandidateDiscovery(userQuery, contract, (src, accepted, rejectionReason) => {
+          if (accepted) {
+            if (!sourcesMap.has(src.url)) {
+              sourcesMap.set(src.url, src);
+              allSources.push(src);
+            }
+          } else {
+            rejectedSources.push(src);
+            this.emit('source_rejected', `Source rejected by Relevance Gate: ${src.domain} (${rejectionReason})`, 'explorer', { source: src, rejectionReason });
+          }
+        });
+
+        this.emit(
+          'claim_found', 
+          `Candidate Discovery complete: Surfaced ${candidateEntities.length} candidates [${candidateEntities.map(c => c.name).join(', ')}]`, 
+          'explorer', 
+          { candidates: candidateEntities }
+        );
+      } else if (contract.intent === 'COMPARISON' && contract.requiredEntities.length > 0) {
+        // Explicit comparison entities
+        candidateEntities = contract.requiredEntities.map(name => ({
+          name,
+          category: 'Comparative Entity',
+          briefRationale: 'Explicit entity requested by user for side-by-side comparison',
+        }));
+      }
+
+      // ==========================================
+      // STAGE 3: EXPLORER AGENT (Discovery Vector)
+      // ==========================================
+      this.emit('agent_started', 'Launching Explorer Agent (Discovery Vector) across verified relevant sources', 'explorer');
+
+      const explorerResult = await this.runExplorerAgent(
+        userQuery, 
+        plan, 
+        candidateEntities,
+        (src, accepted, rejectionReason) => {
+          if (accepted) {
+            if (!sourcesMap.has(src.url)) {
+              sourcesMap.set(src.url, src);
+              allSources.push(src);
+            }
+          } else {
+            rejectedSources.push(src);
+            this.emit('source_rejected', `Source rejected by Relevance Gate: ${src.domain} (${rejectionReason})`, 'explorer', { source: src, rejectionReason });
+          }
         }
-      });
+      );
 
-      // Collect explorer claims
+      // Collect Explorer claims
       for (const ent of explorerResult.discoveredEntities) {
         for (const [field, fData] of Object.entries(ent.fields)) {
+          const isMissing = fData.value === null || fData.isMissing;
           allClaims.push({
-            id: `clm-${Math.random().toString(36).substring(2, 9)}`,
+            id: `clm-exp-${Math.random().toString(36).substring(2, 9)}`,
             entityName: ent.name,
             fieldName: field,
             value: fData.value,
@@ -145,104 +232,144 @@ export class ResearchOrchestrator {
             sourceAuthority: classifyAuthority(fData.sourceUrl),
             supportingSnippet: fData.supportingSnippet,
             discoveredBy: 'explorer',
-            confidenceScore: 0.88,
+            confidenceScore: isMissing ? null : 0.85,
             retrievedAt: new Date().toISOString(),
-            verificationStatus: 'INCOMPLETE',
+            verificationStatus: isMissing ? 'INSUFFICIENT_EVIDENCE' : 'SUPPORTED',
           });
         }
       }
 
       // ==========================================
-      // STAGE 3: INVESTIGATOR AGENT (Adversarial Verification Vector)
+      // STAGE 4: INVESTIGATOR AGENT (Sequential Adversarial Vector)
       // ==========================================
-      this.emit('agent_started', 'Launching Investigator Agent (Adversarial Vector) to audit candidate claims against regulatory & primary records', 'investigator');
+      this.emit('agent_started', 'Launching Investigator Agent (Adversarial Vector) to audit candidate claims against statutory & primary records', 'investigator');
 
-      const investigatorResult = await this.runInvestigatorAgent(userQuery, plan, explorerResult.discoveredEntities, (src) => {
-        if (!sourcesMap.has(src.url)) {
-          sourcesMap.set(src.url, src);
-          allSources.push(src);
+      const targetEntitiesForInvestigator = explorerResult.discoveredEntities.length > 0 
+        ? explorerResult.discoveredEntities 
+        : candidateEntities.map(c => ({ name: c.name, location: c.location, category: c.category, fields: {} }));
+
+      const investigatorResult = await this.runInvestigatorAgent(
+        userQuery, 
+        plan, 
+        targetEntitiesForInvestigator, 
+        (src, accepted, rejectionReason) => {
+          if (accepted) {
+            if (!sourcesMap.has(src.url)) {
+              sourcesMap.set(src.url, src);
+              allSources.push(src);
+            }
+          } else {
+            rejectedSources.push(src);
+            this.emit('source_rejected', `Source rejected by Relevance Gate: ${src.domain} (${rejectionReason})`, 'investigator', { source: src, rejectionReason });
+          }
         }
-      });
+      );
 
-      // Collect investigator verified confirmations
+      // Collect Investigator verified confirmations as distinct Investigator claims
       for (const conf of investigatorResult.verifiedConfirmations) {
-        const existing = allClaims.find(
-          c => c.entityName.toLowerCase() === conf.entityName.toLowerCase() &&
-               c.fieldName.toLowerCase() === conf.fieldName.toLowerCase()
-        );
-        if (existing) {
-          existing.verificationStatus = 'VERIFIED';
-          existing.confidenceScore = 0.96;
-        } else {
-          allClaims.push({
-            id: `clm-${Math.random().toString(36).substring(2, 9)}`,
-            entityName: conf.entityName,
-            fieldName: conf.fieldName,
-            value: conf.confirmedValue,
-            sourceUrl: conf.officialSourceUrl,
-            sourceTitle: conf.officialSourceTitle,
-            sourceAuthority: classifyAuthority(conf.officialSourceUrl),
-            supportingSnippet: conf.supportingSnippet,
-            discoveredBy: 'investigator',
-            confidenceScore: 0.95,
-            retrievedAt: new Date().toISOString(),
-            verificationStatus: 'VERIFIED',
-          });
-        }
+        const isMissing = conf.confirmedValue === null;
+        allClaims.push({
+          id: `clm-inv-${Math.random().toString(36).substring(2, 9)}`,
+          entityName: conf.entityName,
+          fieldName: conf.fieldName,
+          value: conf.confirmedValue,
+          sourceUrl: conf.officialSourceUrl,
+          sourceTitle: conf.officialSourceTitle,
+          sourceAuthority: classifyAuthority(conf.officialSourceUrl),
+          supportingSnippet: conf.supportingSnippet,
+          discoveredBy: 'investigator',
+          confidenceScore: isMissing ? null : 0.95,
+          retrievedAt: new Date().toISOString(),
+          verificationStatus: isMissing ? 'INSUFFICIENT_EVIDENCE' : 'VERIFIED',
+        });
       }
 
-      // Collect investigator challenges as claims if not already in pool
+      // Collect Investigator challenges as distinct Investigator claims
       for (const chal of investigatorResult.counterEvidenceOrChallenges) {
-        const existing = allClaims.find(
-          c => c.entityName.toLowerCase() === chal.entityName.toLowerCase() &&
-               c.fieldName.toLowerCase() === chal.fieldName.toLowerCase()
+        const isMissing = chal.primaryEvidenceValue === null;
+        allClaims.push({
+          id: `clm-inv-chal-${Math.random().toString(36).substring(2, 9)}`,
+          entityName: chal.entityName,
+          fieldName: chal.fieldName,
+          value: chal.primaryEvidenceValue,
+          sourceUrl: chal.primarySourceUrl,
+          sourceTitle: chal.primarySourceTitle,
+          sourceAuthority: classifyAuthority(chal.primarySourceUrl),
+          supportingSnippet: chal.supportingSnippet,
+          discoveredBy: 'investigator',
+          confidenceScore: isMissing ? null : 0.92,
+          retrievedAt: new Date().toISOString(),
+          verificationStatus: isMissing ? 'INSUFFICIENT_EVIDENCE' : 'VERIFIED',
+        });
+      }
+
+      // Record explicitly identified missing fields
+      for (const miss of investigatorResult.missingFieldsIdentified) {
+        const existingMissing = allClaims.find(
+          c => c.entityName.toLowerCase() === miss.entityName.toLowerCase() &&
+               c.fieldName.toLowerCase() === miss.missingField.toLowerCase() &&
+               c.value === null
         );
-        if (!existing) {
+        if (!existingMissing) {
           allClaims.push({
-            id: `clm-${Math.random().toString(36).substring(2, 9)}`,
-            entityName: chal.entityName,
-            fieldName: chal.fieldName,
-            value: chal.primaryEvidenceValue,
-            sourceUrl: chal.primarySourceUrl,
-            sourceTitle: chal.primarySourceTitle,
-            sourceAuthority: classifyAuthority(chal.primarySourceUrl),
-            supportingSnippet: chal.supportingSnippet,
+            id: `clm-miss-${Math.random().toString(36).substring(2, 9)}`,
+            entityName: miss.entityName,
+            fieldName: miss.missingField,
+            value: null,
+            sourceUrl: 'https://official.gov/registry',
+            sourceTitle: 'Public Record Audit',
+            sourceAuthority: 'GOVERNMENT_STATUTORY',
+            supportingSnippet: miss.reasonNotDisclosed || 'No authoritative public disclosure found during adversarial verification audit.',
             discoveredBy: 'investigator',
-            confidenceScore: 0.92,
+            confidenceScore: null,
             retrievedAt: new Date().toISOString(),
-            verificationStatus: 'VERIFIED',
+            verificationStatus: 'INSUFFICIENT_EVIDENCE',
           });
         }
       }
 
       // ==========================================
-      // STAGE 3: CONFLICT DETECTION & ARBITRATION
+      // STAGE 5: CONTRADICTION & CONFLICT AUDIT
       // ==========================================
-      this.emit('arbiter_started', 'Research Arbiter activated: Reconciling Explorer evidence with Investigator findings', 'arbiter');
+      this.emit('arbiter_started', 'Research Arbiter activated: Auditing claims for substantive contradictions', 'arbiter');
 
       const initialConflicts: ConflictItem[] = [];
 
       // Check Investigator challenges against Explorer claims
       for (const challenge of investigatorResult.counterEvidenceOrChallenges) {
-        const matchingClaim = allClaims.find(
-          c => c.entityName.toLowerCase() === challenge.entityName.toLowerCase() &&
+        const explorerClaim = allClaims.find(
+          c => c.discoveredBy === 'explorer' &&
+               c.entityName.toLowerCase() === challenge.entityName.toLowerCase() &&
                c.fieldName.toLowerCase() === challenge.fieldName.toLowerCase()
         );
 
-        if (matchingClaim && matchingClaim.value.toLowerCase() !== challenge.primaryEvidenceValue.toLowerCase()) {
+        // DO NOT TREAT MUTUAL MISSING VALUES AS CONTRADICTIONS!
+        const expVal = explorerClaim?.value;
+        const invVal = challenge.primaryEvidenceValue;
+
+        const isRealContradiction = 
+          expVal !== null && 
+          expVal !== undefined && 
+          invVal !== null && 
+          invVal !== undefined &&
+          expVal.trim().toLowerCase() !== invVal.trim().toLowerCase() &&
+          !this.isMissingPlaceholder(expVal) &&
+          !this.isMissingPlaceholder(invVal);
+
+        if (isRealContradiction && explorerClaim) {
           const conflict: ConflictItem = {
             id: `cfl-${Math.random().toString(36).substring(2, 9)}`,
             entityName: challenge.entityName,
             fieldName: challenge.fieldName,
             explorerClaim: {
-              value: matchingClaim.value,
-              sourceUrl: matchingClaim.sourceUrl,
-              sourceTitle: matchingClaim.sourceTitle,
-              authority: matchingClaim.sourceAuthority,
-              snippet: matchingClaim.supportingSnippet,
+              value: expVal,
+              sourceUrl: explorerClaim.sourceUrl,
+              sourceTitle: explorerClaim.sourceTitle,
+              authority: explorerClaim.sourceAuthority,
+              snippet: explorerClaim.supportingSnippet,
             },
             investigatorClaim: {
-              value: challenge.primaryEvidenceValue,
+              value: invVal,
               sourceUrl: challenge.primarySourceUrl,
               sourceTitle: challenge.primarySourceTitle,
               authority: classifyAuthority(challenge.primarySourceUrl),
@@ -253,11 +380,11 @@ export class ResearchOrchestrator {
             resolutionStatus: 'PENDING',
           };
           initialConflicts.push(conflict);
-          this.emit('conflict_detected', `Discrepancy detected for "${challenge.entityName}" - ${challenge.fieldName}: Explorer says "${matchingClaim.value}", Investigator found "${challenge.primaryEvidenceValue}"`, 'arbiter', { conflict });
+          this.emit('conflict_detected', `Discrepancy detected for "${challenge.entityName}" [${challenge.fieldName}]: Explorer ("${expVal}") vs Investigator ("${invVal}")`, 'arbiter', { conflict });
         }
       }
 
-      // If conflicts exist, let Arbiter run targeted escalation search
+      // Escalation search for real conflicts
       for (const conflict of initialConflicts) {
         this.emit('escalation_started', `Arbiter escalating conflict for ${conflict.entityName} (${conflict.fieldName}): Initiating targeted web verification`, 'arbiter');
         
@@ -265,14 +392,16 @@ export class ResearchOrchestrator {
         conflict.escalatedToWebSearch = true;
         conflict.targetedQuery = targetedQuery;
 
-        const liveResults = await searchLiveWeb(targetedQuery, 2);
-        if (liveResults.length > 0) {
-          const escalatedSrc = buildSourceFromSearch(liveResults[0], 'arbiter');
+        const liveResults = await searchLiveWeb(targetedQuery, 3);
+        const acceptedEscalated = liveResults.filter(r => validateSourceRelevance(r, userQuery, conflict.entityName, conflict.fieldName).accepted);
+
+        if (acceptedEscalated.length > 0) {
+          const escalatedSrc = buildSourceFromSearch(acceptedEscalated[0], 'arbiter');
           if (!sourcesMap.has(escalatedSrc.url)) {
             sourcesMap.set(escalatedSrc.url, escalatedSrc);
             allSources.push(escalatedSrc);
           }
-          conflict.newEvidenceDiscovered = `Targeted search verified against ${escalatedSrc.title}: ${liveResults[0].snippet.slice(0, 150)}`;
+          conflict.newEvidenceDiscovered = `Targeted search verified against ${escalatedSrc.title}: ${acceptedEscalated[0].snippet.slice(0, 150)}`;
           this.emit('source_found', `Arbiter found targeted primary evidence: ${escalatedSrc.domain}`, 'arbiter', { source: escalatedSrc });
         }
         this.emit('escalation_completed', `Targeted verification completed for ${conflict.entityName}`, 'arbiter');
@@ -280,7 +409,8 @@ export class ResearchOrchestrator {
 
       // Run Arbiter LLM evaluation
       const entitiesSummary = allClaims
-        .slice(0, 15)
+        .filter(c => c.value !== null)
+        .slice(0, 16)
         .map(c => `- ${c.entityName} [${c.fieldName}]: "${c.value}" (source: ${c.sourceTitle || c.sourceUrl}, authority: ${c.sourceAuthority})`)
         .join('\n');
 
@@ -288,7 +418,7 @@ export class ResearchOrchestrator {
       const arbiterUserPrompt = buildArbiterUserPrompt({
         plan,
         conflicts: initialConflicts,
-        entitiesSummary,
+        entitiesSummary: entitiesSummary || 'No substantive conflicting claims detected; all claims corroborated or missing.',
       });
 
       const { data: arbiterBatch } = await callGroqStructured({
@@ -309,125 +439,87 @@ export class ResearchOrchestrator {
           conflict.finalValue = evalMatch.resolvedValue;
           conflict.decisionBasis = evalMatch.decisionBasis;
           conflict.resolutionStatus = evalMatch.resolution === 'UNRESOLVED' ? 'UNRESOLVED' : 'RESOLVED';
-          this.emit('arbiter_decision', `Arbiter resolved ${conflict.entityName} [${conflict.fieldName}]: ${evalMatch.resolution} (${evalMatch.decisionBasis})`, 'arbiter', { decision: evalMatch });
+          this.emit('arbiter_decision', `Arbiter adjudicated ${conflict.entityName} [${conflict.fieldName}]: ${evalMatch.resolution} (${evalMatch.decisionBasis})`, 'arbiter', { decision: evalMatch });
         } else {
           conflict.arbiterDecision = 'INVESTIGATOR_SELECTED';
           conflict.finalValue = conflict.investigatorClaim.value;
-          conflict.decisionBasis = 'Investigator primary evidence prioritized over secondary directory';
+          conflict.decisionBasis = 'Investigator statutory/primary source preferred';
           conflict.resolutionStatus = 'RESOLVED';
         }
       }
 
-      // Construct normalized DiscoveredEntities
-      const finalEntities: DiscoveredEntity[] = [];
-      const entityNames = Array.from(new Set(allClaims.map(c => c.entityName)));
+      // Build DiscoveredEntities
+      let currentEntities = this.buildEntitiesFromClaims(allClaims, initialConflicts, plan);
 
-      for (const name of entityNames) {
-        const claimsForEntity = allClaims.filter(c => c.entityName === name);
-        const fieldsObj: DiscoveredEntity['fields'] = {};
-        let verifiedCount = 0;
+      // ==========================================
+      // STAGE 6: DETERMINISTIC QUALITY GATE & RESEARCH REPAIR LOOP
+      // ==========================================
+      let qualityGate = this.evaluateQualityGate(contract, currentEntities, allSources);
+      let repairRound = 1;
 
-        for (const claim of claimsForEntity) {
-          const conflict = initialConflicts.find(c => c.entityName === name && c.fieldName === claim.fieldName);
-          const finalVal = conflict ? (conflict.finalValue || claim.value) : claim.value;
-          const status: ClaimVerificationStatus = conflict 
-            ? (conflict.resolutionStatus === 'RESOLVED' ? 'VERIFIED' : 'CONFLICTING')
-            : 'VERIFIED';
+      while (!qualityGate.passed && repairRound <= contract.maximumResearchRounds) {
+        this.emit(
+          'quality_gate_failed', 
+          `Quality Gate check round ${repairRound} failed: ${qualityGate.issues?.join('; ') || qualityGate.failures?.join('; ') || 'Criteria unsatisfied'}. Initiating Research Repair round ${repairRound}.`, 
+          'arbiter', 
+          { qualityGate, repairRound }
+        );
 
-          if (status === 'VERIFIED') verifiedCount++;
-
-          fieldsObj[claim.fieldName] = {
-            value: finalVal,
-            verifiedStatus: status,
-            sourceUrl: claim.sourceUrl,
-            sourceTitle: claim.sourceTitle,
-            authority: claim.sourceAuthority,
-            evidenceStrength: status === 'VERIFIED' ? 92 : 60,
-            snippet: claim.supportingSnippet,
-            resolvedBy: conflict?.arbiterDecision || 'CONSENSUS',
-            decisionBasis: conflict?.decisionBasis || 'Corroborated by independent web research',
-          };
-        }
-
-        const coverage = claimsForEntity.length > 0 ? Math.round((verifiedCount / claimsForEntity.length) * 100) : 0;
-        finalEntities.push({
-          id: `ent-${Math.random().toString(36).substring(2, 9)}`,
-          name,
-          category: 'Verified Entity',
-          location: plan.geographyScope,
-          fields: fieldsObj,
-          overallStatus: coverage > 75 ? 'VERIFIED' : (coverage > 40 ? 'INCOMPLETE' : 'CONFLICTING'),
-          evidenceCoverage: coverage,
+        // Generate targeted repair search plan
+        const repairPrompt = buildResearchRepairSystemPrompt();
+        const repairUserPrompt = buildResearchRepairUserPrompt({
+          userQuery,
+          contract,
+          qualityGateResult: qualityGate,
+          roundNumber: repairRound,
         });
-      }
 
-      // If finalEntities is empty despite finding web sources, derive candidate entities from the verified sources
-      if (finalEntities.length === 0 && allSources.length > 0) {
-        for (const src of allSources.slice(0, 4)) {
-          const rawName = src.title.split(/[-–|:•]/)[0].trim();
-          const entityName = (rawName.length >= 3 && rawName.length <= 60) ? rawName : src.domain;
-          const fieldsObj: DiscoveredEntity['fields'] = {
-            'Identified Platform / Operator': {
-              value: src.domain,
-              verifiedStatus: 'VERIFIED',
-              sourceUrl: src.url,
-              sourceTitle: src.title,
-              authority: src.authority,
-              evidenceStrength: 85,
-              snippet: src.snippet,
-              resolvedBy: 'CONSENSUS',
-              decisionBasis: 'Identified via verified web search record',
-            },
-            'Primary Finding': {
-              value: src.snippet.slice(0, 160) || 'Active service provider in target geography',
-              verifiedStatus: 'VERIFIED',
-              sourceUrl: src.url,
-              sourceTitle: src.title,
-              authority: src.authority,
-              evidenceStrength: 80,
-              snippet: src.snippet,
-              resolvedBy: 'CONSENSUS',
-              decisionBasis: 'Documented public web listing',
-            },
-          };
+        const { data: repairPlan } = await callGroqStructured({
+          systemPrompt: repairPrompt,
+          userPrompt: repairUserPrompt,
+          schema: ResearchRepairPlanSchema,
+          agentRole: 'planner',
+        });
 
-          finalEntities.push({
-            id: `ent-${Math.random().toString(36).substring(2, 9)}`,
-            name: entityName,
-            category: 'Identified Entity / Provider',
-            location: plan.geographyScope,
-            fields: fieldsObj,
-            overallStatus: 'VERIFIED',
-            evidenceCoverage: 80,
-          });
-
-          allClaims.push({
-            id: `clm-${Math.random().toString(36).substring(2, 9)}`,
-            entityName,
-            fieldName: 'Identified Platform / Operator',
-            value: src.domain,
-            sourceUrl: src.url,
-            sourceTitle: src.title,
-            sourceAuthority: src.authority,
-            supportingSnippet: src.snippet,
-            discoveredBy: 'explorer',
-            confidenceScore: 0.85,
-            retrievedAt: new Date().toISOString(),
-            verificationStatus: 'VERIFIED',
-          });
+        // Execute targeted repair queries
+        for (const query of repairPlan.targetedQueries.slice(0, 3)) {
+          this.emit('search_query', `Research Repair querying: "${query}"`, 'investigator', { query });
+          const repairResults = await searchLiveWeb(query, 3);
+          for (const item of repairResults) {
+            const rel = validateSourceRelevance(item, userQuery);
+            if (rel.accepted) {
+              const src = buildSourceFromSearch(item, 'investigator');
+              if (!sourcesMap.has(src.url)) {
+                sourcesMap.set(src.url, src);
+                allSources.push(src);
+                this.emit('source_found', `Research Repair surfaced relevant source: ${src.domain}`, 'investigator', { source: src });
+              }
+            }
+          }
         }
+
+        repairRound++;
+        // Re-evaluate entities & Quality Gate
+        currentEntities = this.buildEntitiesFromClaims(allClaims, initialConflicts, plan);
+        qualityGate = this.evaluateQualityGate(contract, currentEntities, allSources);
+      }
+
+      if (qualityGate.passed) {
+        this.emit('quality_gate_passed', `Quality Gate passed: Research Contract requirements successfully satisfied.`, 'arbiter', { qualityGate });
+      } else {
+        this.emit('quality_gate_passed', `Research bounded after ${contract.maximumResearchRounds} rounds: Proceeding with transparent disclosure of unverified data.`, 'arbiter', { qualityGate });
       }
 
       // ==========================================
-      // STAGE 4: FINAL SYNTHESIS & DASHBOARD GENERATOR
+      // STAGE 7: FINAL SYNTHESIS & DASHBOARD GENERATOR
       // ==========================================
-      this.emit('visualizer_started', 'Final Synthesis Agent: Structuring executive intelligence brief and dynamic evidence widgets', 'visualizer');
+      this.emit('visualizer_started', 'Final Synthesis Agent: Structuring executive intelligence brief and verified evidence widgets', 'visualizer');
 
       const dashboardPrompt = buildFinalSynthesisSystemPrompt();
       const dashboardUserPrompt = buildFinalSynthesisUserPrompt({
         query: userQuery,
         plan,
-        entities: finalEntities,
+        entities: currentEntities,
         conflicts: initialConflicts,
         sources: allSources,
       });
@@ -439,17 +531,23 @@ export class ResearchOrchestrator {
         agentRole: 'synthesis',
       });
 
-      this.emit('dashboard_generated', `Dashboard ready with ${dashboardSpec.metrics.length} metrics, ${dashboardSpec.charts.length} charts, and full evidence table`, 'visualizer', { dashboardSpec });
-      this.emit('research_completed', `Autonomous research completed. ${finalEntities.length} entities verified across ${allSources.length} authentic web sources.`);
+      // Calculate truthful metrics
+      const metrics = computeCanonicalMetrics(currentEntities);
+
+      this.emit('dashboard_generated', `Dashboard ready with ${dashboardSpec.metrics.length} metrics, ${dashboardSpec.charts.length} charts, and verified evidence matrix`, 'visualizer', { dashboardSpec });
+
+      const completionMessage = `Research completed. ${currentEntities.length} entities evaluated across ${allSources.length} authentic sources; ${metrics.verifiedCount} fields verified, ${metrics.insufficientCount} fields insufficient/unresolved.`;
+      this.emit('research_completed', completionMessage, 'arbiter', { metrics, qualityGate });
 
       return {
         plan,
         sources: allSources,
-        entities: finalEntities,
+        entities: currentEntities,
         claims: allClaims,
         conflicts: initialConflicts,
         dashboardSpec,
         isDemoMode: false,
+        qualityGate,
       };
     } catch (err: any) {
       console.error('[ResearchOrchestrator] Execution failed:', err);
@@ -460,29 +558,95 @@ export class ResearchOrchestrator {
   }
 
   /**
+   * Candidate Discovery Phase for Ranking, Recommendation, and Discovery queries
+   */
+  private async runCandidateDiscovery(
+    userQuery: string,
+    contract: ResearchContract,
+    onSourceEvaluated: (src: DiscoveredSource, accepted: boolean, reason?: string) => void
+  ): Promise<CandidateEntity[]> {
+    const discoveryQueries = [
+      userQuery,
+      `${contract.topic} ${contract.scope?.geography || ''} list overview official`,
+    ];
+
+    const discoveredSources: DiscoveredSource[] = [];
+
+    for (const q of discoveryQueries) {
+      const cleanQ = q.replace(/^["']|["']$/g, '').trim();
+      this.emit('search_query', `Candidate Discovery searching: "${cleanQ}"`, 'explorer', { query: cleanQ });
+      const results = await searchLiveWeb(cleanQ, 4);
+
+      for (const item of results) {
+        const relevance = validateSourceRelevance(item, userQuery);
+        const src = buildSourceFromSearch(item, 'explorer');
+        onSourceEvaluated(src, relevance.accepted, relevance.rejectionReason);
+        if (relevance.accepted) {
+          discoveredSources.push(src);
+        }
+      }
+    }
+
+    if (discoveredSources.length === 0) {
+      return [];
+    }
+
+    const discoveryPrompt = buildCandidateDiscoverySystemPrompt();
+    const discoveryUserPrompt = buildCandidateDiscoveryUserPrompt({
+      userQuery,
+      contract,
+      webSources: discoveredSources.slice(0, 6),
+    });
+
+    const { data: discoveryResult } = await callGroqStructured({
+      systemPrompt: discoveryPrompt,
+      userPrompt: discoveryUserPrompt,
+      schema: CandidateDiscoveryOutputSchema,
+      agentRole: 'explorer',
+    });
+
+    return discoveryResult.candidates;
+  }
+
+  /**
    * Explorer Agent: Breadth, discovery, multi-query variation, scraping candidate pages
    */
   private async runExplorerAgent(
     userQuery: string, 
     plan: ResearchPlan,
-    onSourceFound: (src: DiscoveredSource) => void
+    candidates: CandidateEntity[],
+    onSourceEvaluated: (src: DiscoveredSource, accepted: boolean, reason?: string) => void
   ) {
     this.emit('search_started', `Explorer querying discovery vectors: ${plan.searchStrategies.explorerFocus.slice(0, 2).join(' | ')}`, 'explorer');
 
     const discoveredUrls: string[] = [];
     const searchSnippets: Array<{ title: string; url: string; snippet: string; domain: string }> = [];
 
-    // Run 2 focused discovery queries (3 results each)
-    for (const rawQ of plan.searchStrategies.explorerFocus.slice(0, 2)) {
+    // Formulate entity-specific queries if candidates exist
+    const queriesToRun: string[] = [];
+    if (candidates.length > 0) {
+      for (const c of candidates.slice(0, 4)) {
+        queriesToRun.push(`${c.name} ${plan.requiredFields[0]} ${plan.requiredFields[1] || ''}`);
+      }
+    } else {
+      queriesToRun.push(...plan.searchStrategies.explorerFocus.slice(0, 2));
+    }
+
+    // Run focused queries
+    for (const rawQ of queriesToRun.slice(0, 3)) {
       const cleanQ = rawQ.replace(/^["']|["']$/g, '').replace(/^(search\s+for|query|find|explore)\s+/i, '').trim();
       this.emit('search_query', `Explorer searching web: "${cleanQ}"`, 'explorer', { query: cleanQ });
       const results = await searchLiveWeb(cleanQ, 3);
       for (const item of results) {
+        const relevance = validateSourceRelevance(item, userQuery);
         const src = buildSourceFromSearch(item, 'explorer');
-        onSourceFound(src);
-        discoveredUrls.push(item.url);
-        searchSnippets.push(item);
-        this.emit('source_found', `Explorer discovered: ${src.domain} (${src.title})`, 'explorer', { source: src });
+        onSourceEvaluated(src, relevance.accepted, relevance.rejectionReason);
+
+        if (relevance.accepted) {
+          discoveredUrls.push(item.url);
+          searchSnippets.push(item);
+          this.emit('source_found', `Explorer discovered relevant source: ${src.domain} (${src.title})`, 'explorer', { source: src });
+        }
       }
     }
 
@@ -523,7 +687,9 @@ export class ResearchOrchestrator {
         snippet: s.snippet.slice(0, 250) + (scrapedMap.has(s.url) ? `\n[Page Content]: ${scrapedMap.get(s.url)}` : ''),
         scrapedSuccessfully: scrapedMap.has(s.url),
       })),
-      userQuery,
+      userQuery: candidates.length > 0
+        ? `${userQuery}\nTarget candidates to research: ${candidates.map(c => c.name).join(', ')}`
+        : userQuery,
     });
 
     const { data: explorerOutput } = await callGroqStructured({
@@ -544,24 +710,37 @@ export class ResearchOrchestrator {
     userQuery: string, 
     plan: ResearchPlan,
     explorerEntities: any[],
-    onSourceFound: (src: DiscoveredSource) => void
+    onSourceEvaluated: (src: DiscoveredSource, accepted: boolean, reason?: string) => void
   ) {
     this.emit('search_started', `Investigator executing adversarial verification queries`, 'investigator');
 
     const discoveredUrls: string[] = [];
     const searchSnippets: Array<{ title: string; url: string; snippet: string; domain: string }> = [];
 
-    // Run 2 focused verification queries (3 results each)
-    for (const rawQ of plan.searchStrategies.investigatorFocus.slice(0, 2)) {
+    // Build targeted verification queries
+    const verificationQueries: string[] = [];
+    if (explorerEntities.length > 0) {
+      for (const ent of explorerEntities.slice(0, 3)) {
+        verificationQueries.push(`${ent.name} official ${plan.requiredFields[0]} statutory verification`);
+      }
+    } else {
+      verificationQueries.push(...plan.searchStrategies.investigatorFocus.slice(0, 2));
+    }
+
+    for (const rawQ of verificationQueries.slice(0, 3)) {
       const cleanQ = rawQ.replace(/^["']|["']$/g, '').replace(/^(verify|check|search\s+for|query)\s+/i, '').trim();
       this.emit('search_query', `Investigator searching: "${cleanQ}"`, 'investigator', { query: cleanQ });
       const results = await searchLiveWeb(cleanQ, 3);
       for (const item of results) {
+        const relevance = validateSourceRelevance(item, userQuery);
         const src = buildSourceFromSearch(item, 'investigator');
-        onSourceFound(src);
-        discoveredUrls.push(item.url);
-        searchSnippets.push(item);
-        this.emit('source_found', `Investigator found primary source: ${src.domain}`, 'investigator', { source: src });
+        onSourceEvaluated(src, relevance.accepted, relevance.rejectionReason);
+
+        if (relevance.accepted) {
+          discoveredUrls.push(item.url);
+          searchSnippets.push(item);
+          this.emit('source_found', `Investigator found primary source: ${src.domain}`, 'investigator', { source: src });
+        }
       }
     }
 
@@ -617,8 +796,216 @@ export class ResearchOrchestrator {
   }
 
   /**
-   * High-fidelity demonstration pipeline for seamless evaluation even before GROQ_API_KEY is supplied.
-   * Emits authentic step-by-step events with real live timing and accurate web data.
+   * Deterministically evaluate the Research Contract before Final Synthesis
+   */
+  private evaluateQualityGate(
+    contract: ResearchContract,
+    entities: DiscoveredEntity[],
+    sources: DiscoveredSource[]
+  ): QualityGateResult {
+    const issues: string[] = [];
+    const missingEntities: string[] = [];
+    const missingFields: Array<{ entityName: string; fieldName: string }> = [];
+
+    // 1. Required Entities Check (for Comparison queries)
+    if (contract.requiredEntities && contract.requiredEntities.length > 0) {
+      for (const reqEnt of contract.requiredEntities) {
+        const found = entities.some(e => e.name.toLowerCase().includes(reqEnt.toLowerCase()));
+        if (!found) {
+          missingEntities.push(reqEnt);
+          issues.push(`Required comparison entity "${reqEnt}" was not sufficiently researched`);
+        }
+      }
+    }
+
+    // 2. Candidate Discovery Check (for Ranking / Recommendation queries)
+    if (contract.candidateDiscoveryRequired) {
+      const minRequired = Math.min(3, contract.targetCandidateCount || 5);
+      if (entities.length < minRequired) {
+        issues.push(`Candidate count insufficient: surfaced ${entities.length} candidates, minimum required is ${minRequired}`);
+      }
+    }
+
+    // 3. Required Fields Coverage Check
+    for (const ent of entities) {
+      for (const reqField of contract.requiredFields) {
+        const fieldData = ent.fields[reqField];
+        if (!fieldData || fieldData.value === null || fieldData.verifiedStatus === 'INSUFFICIENT_EVIDENCE') {
+          missingFields.push({ entityName: ent.name, fieldName: reqField });
+        }
+      }
+    }
+
+    const passed = issues.length === 0;
+
+    return {
+      passed,
+      issues,
+      requiredEntitiesPassed: missingEntities.length === 0,
+      candidateCountPassed: !contract.candidateDiscoveryRequired || entities.length >= Math.min(3, contract.targetCandidateCount || 5),
+      fieldCoveragePassed: missingFields.length === 0,
+      candidateCount: entities.length,
+      targetCandidateCount: contract.targetCandidateCount || 5,
+      missingEntities,
+      missingFields,
+    };
+  }
+
+  /**
+   * Construct canonical normalized DiscoveredEntities from accumulated claims
+   */
+  private buildEntitiesFromClaims(
+    allClaims: ExtractedClaim[],
+    conflicts: ConflictItem[],
+    plan: ResearchPlan
+  ): DiscoveredEntity[] {
+    const finalEntities: DiscoveredEntity[] = [];
+    const entityNames = Array.from(new Set(allClaims.map(c => c.entityName)));
+
+    for (const name of entityNames) {
+      const claimsForEntity = allClaims.filter(c => c.entityName === name);
+      const fieldsObj: DiscoveredEntity['fields'] = {};
+      let verifiedCount = 0;
+      let totalFields = 0;
+
+      // Group claims by field
+      const fieldNames = Array.from(new Set(claimsForEntity.map(c => c.fieldName)));
+
+      for (const fName of fieldNames) {
+        totalFields++;
+        const fieldClaims = claimsForEntity.filter(c => c.fieldName === fName);
+        const conflict = conflicts.find(c => c.entityName.toLowerCase() === name.toLowerCase() && c.fieldName.toLowerCase() === fName.toLowerCase());
+
+        // Prefer investigator claim or resolved arbiter claim
+        const invClaim = fieldClaims.find(c => c.discoveredBy === 'investigator' && c.value !== null);
+        const expClaim = fieldClaims.find(c => c.discoveredBy === 'explorer' && c.value !== null);
+        const primaryClaim = invClaim || expClaim || fieldClaims[0];
+
+        let finalVal: string | null = primaryClaim?.value ?? null;
+        let finalStatus: ClaimVerificationStatus = 'INSUFFICIENT_EVIDENCE';
+        let confidenceScore: number | null = null;
+        let decisionBasis = 'Determined via multi-agent web verification';
+
+        if (conflict) {
+          finalVal = conflict.finalValue ?? null;
+          finalStatus = conflict.resolutionStatus === 'RESOLVED' ? 'VERIFIED' : 'CONFLICTING';
+          decisionBasis = conflict.decisionBasis || 'Resolved under statutory evidence hierarchy';
+          confidenceScore = finalVal !== null ? 90 : null;
+        } else if (finalVal === null || this.isMissingPlaceholder(finalVal)) {
+          finalVal = null;
+          finalStatus = 'INSUFFICIENT_EVIDENCE';
+          confidenceScore = null;
+          decisionBasis = 'No authoritative disclosure located in public source records';
+        } else if (invClaim) {
+          finalStatus = 'VERIFIED';
+          confidenceScore = 95;
+          decisionBasis = 'Corroborated by primary/statutory authority record';
+        } else if (expClaim) {
+          finalStatus = 'SUPPORTED';
+          confidenceScore = 80;
+          decisionBasis = 'Extracted from public web source; awaiting statutory confirmation';
+        }
+
+        if (finalStatus === 'VERIFIED') verifiedCount++;
+
+        fieldsObj[fName] = {
+          value: finalVal,
+          verifiedStatus: finalStatus,
+          sourceUrl: primaryClaim?.sourceUrl || 'https://web.archive.org/source',
+          sourceTitle: primaryClaim?.sourceTitle || 'Public Web Record',
+          authority: primaryClaim?.sourceAuthority || 'UNVERIFIED',
+          evidenceStrength: confidenceScore ?? 0,
+          snippet: primaryClaim?.supportingSnippet || 'Public web record excerpt',
+          resolvedBy: conflict?.arbiterDecision || (invClaim ? 'INVESTIGATOR_SELECTED' : 'CONSENSUS'),
+          decisionBasis,
+        };
+      }
+
+      const coverage = totalFields > 0 ? Math.round((verifiedCount / totalFields) * 100) : 0;
+      finalEntities.push({
+        id: `ent-${Math.random().toString(36).substring(2, 9)}`,
+        name,
+        category: 'Audited Entity',
+        location: plan.geographyScope,
+        fields: fieldsObj,
+        overallStatus: coverage > 60 ? 'VERIFIED' : (coverage > 25 ? 'INCOMPLETE' : 'CONFLICTING'),
+        evidenceCoverage: coverage,
+      });
+    }
+
+    return finalEntities;
+  }
+
+  private isMissingPlaceholder(val: any): boolean {
+    if (val === null || val === undefined) return true;
+    const s = String(val).trim().toLowerCase();
+    return (
+      s === '' ||
+      s === 'not disclosed' ||
+      s === 'not disclosed in source' ||
+      s === 'not available' ||
+      s === 'unavailable' ||
+      s === 'none' ||
+      s === 'n/a' ||
+      s === 'null' ||
+      s === 'insufficient evidence'
+    );
+  }
+
+  private inferIntent(query: string): any {
+    const q = query.toLowerCase();
+    if (q.startsWith('compare') || q.includes(' vs ') || q.includes('versus') || q.includes('difference between')) {
+      return 'COMPARISON';
+    }
+    if (q.includes('best') || q.includes('top') || q.includes('rank') || q.includes('highest') || q.includes('lowest')) {
+      return 'RANKING';
+    }
+    if (q.startsWith('when') || q.startsWith('who is') || q.startsWith('what is the release date') || q.includes('release date')) {
+      return 'FACT_LOOKUP';
+    }
+    if (q.includes('policy') || q.includes('regulation') || q.includes('statutory') || q.includes('act ') || q.includes('law')) {
+      return 'POLICY_OR_REGULATORY';
+    }
+    if (q.includes('recommend') || q.includes('should i choose') || q.includes('which one')) {
+      return 'RECOMMENDATION';
+    }
+    return 'EXPLORATORY_RESEARCH';
+  }
+
+  private inferCandidateDiscoveryRequired(query: string): boolean {
+    const q = query.toLowerCase();
+    if (q.includes('best') || q.includes('top') || q.includes('list of') || q.includes('colleges') || q.includes('providers') || q.includes('operators') || q.includes('options')) {
+      return true;
+    }
+    return false;
+  }
+
+  private inferTargetCandidateCount(query: string): number {
+    const q = query.toLowerCase();
+    if (q.includes('best') || q.includes('top') || q.includes('colleges') || q.includes('companies')) {
+      return 5;
+    }
+    return 3;
+  }
+
+  private extractRequiredEntities(query: string): string[] {
+    const q = query.trim();
+    const compareMatch = q.match(/compare\s+([^and]+)\s+and\s+([^for|with|in|\?]+)/i);
+    if (compareMatch) {
+      const e1 = compareMatch[1].trim();
+      const e2 = compareMatch[2].trim();
+      if (e1 && e2) return [e1, e2];
+    }
+    const vsMatch = q.split(/\s+vs\.?\s+|\s+versus\s+/i);
+    if (vsMatch.length >= 2) {
+      return [vsMatch[0].trim(), vsMatch[1].trim()];
+    }
+    return [];
+  }
+
+  /**
+   * High-fidelity demonstration pipeline for initial showcase before GROQ_API_KEY is supplied.
+   * Strictly isolated with zero hardcoded EV contamination for unrelated queries.
    */
   private async runDemonstrationPipeline(userQuery: string): Promise<{
     plan: ResearchPlan;
@@ -630,29 +1017,26 @@ export class ResearchOrchestrator {
     isDemoMode: boolean;
   }> {
     const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
     await sleep(400);
     this.emit('planner_started', `Synthesizing multi-agent research specification for "${userQuery}"`, 'planner');
-    await sleep(700);
+    await sleep(600);
 
-    const isEvQuery = userQuery.toLowerCase().includes('ev') || userQuery.toLowerCase().includes('charging') || userQuery.toLowerCase().includes('rajasthan');
-    const isAiQuery = userQuery.toLowerCase().includes('coding') || userQuery.toLowerCase().includes('tools') || userQuery.toLowerCase().includes('2026');
+    const isEvQuery = (userQuery.toLowerCase().includes('ev') || userQuery.toLowerCase().includes('charging')) && userQuery.toLowerCase().includes('rajasthan');
 
-    // Tailored plan
     const plan: ResearchPlan = isEvQuery ? {
       objective: 'Discover and compare active EV charging network operators in Rajasthan with verified cities, charger specifications, tariff pricing, and official contacts.',
       targetEntitiesDescription: 'Commercial and public EV Charging Station Operators (CPOs)',
       geographyScope: 'Rajasthan, India (Jaipur, Jodhpur, Udaipur, Kota, Ajmer)',
       requiredFields: ['Cities Served', 'Charger Types (CCS2/Type 2)', 'Tariff Pricing (₹/kWh)', 'Official Contact', 'Operational Status'],
       searchStrategies: {
-        explorerFocus: ['EV charging companies operating in Rajasthan', 'Jaipur Jodhpur EV charging stations CPO list', 'Rajasthan EV policy approved charging network'],
-        investigatorFocus: ['Rajasthan Discom EV charging tariff order official', 'BEE EV charging portal Rajasthan operator registry', 'EV charging pricing updates Rajasthan 2026'],
+        explorerFocus: ['EV charging companies operating in Rajasthan', 'Jaipur Jodhpur EV charging stations CPO list'],
+        investigatorFocus: ['Rajasthan Discom EV charging tariff order official', 'BEE EV charging portal Rajasthan operator registry'],
       },
       sourcePreferences: ['BEE India Official Registry', 'Rajasthan Renewable Energy Corp (RREC)', 'Operator Official Portals'],
       verificationRequirements: ['Tariff must match state regulatory commission tariff schedule', 'Operational presence must be corroborated by direct station data'],
       freshnessRequirements: 'Active network status within last 90 days',
       expectedOutputFormat: 'Normalized operator matrix with tariff reconciliation and evidence provenance',
-      potentialResearchRisks: ['Outdated tariff figures quoted from preliminary 2022 draft policies', 'Aggregator apps listing inactive or private chargers'],
+      potentialResearchRisks: ['Outdated tariff figures quoted from preliminary draft policies', 'Aggregator apps listing inactive or private chargers'],
       confidenceThreshold: 0.88,
     } : {
       objective: 'Comprehensive cross-evaluation of state-of-the-art AI developer intelligence systems and coding tools.',
@@ -665,18 +1049,14 @@ export class ResearchOrchestrator {
       },
       sourcePreferences: ['Official Product Documentation', 'Developer Release Notes', 'Primary GitHub Repositories'],
       verificationRequirements: ['Pricing verified from live billing page', 'Model support corroborated by release announcements'],
-      freshnessRequirements: 'Q1-Q3 2026 current production tiers',
+      freshnessRequirements: 'Current production tiers',
       expectedOutputFormat: 'Standardized capability comparison matrix with pricing conflict audit',
       potentialResearchRisks: ['Third-party comparison blogs citing pre-release rumors', 'Recent price cuts not reflected in aggregators'],
       confidenceThreshold: 0.85,
     };
 
     this.emit('planner_completed', `Plan locked: 5 core fields, dual-agent verification criteria established`, 'planner', { plan });
-    await sleep(500);
-
-    // Explorer & Investigator start
-    this.emit('agent_started', 'Launching Explorer Agent (Discovery vector) and Investigator Agent (Adversarial vector)', 'explorer');
-    await sleep(600);
+    await sleep(400);
 
     const sources: DiscoveredSource[] = isEvQuery ? [
       {
@@ -685,8 +1065,8 @@ export class ResearchOrchestrator {
         domain: 'beeindia.gov.in',
         title: 'Bureau of Energy Efficiency - National EV Charging Infrastructure Registry',
         discoveredBy: 'investigator',
-        authority: 'OFFICIAL_GOV',
-        retrievedAt: new Date(Date.now() - 120000).toISOString(),
+        authority: 'GOVERNMENT_STATUTORY',
+        retrievedAt: new Date().toISOString(),
         publishedDate: '2026-03-15',
         snippet: 'Official registry of authorized public charging station operators across Rajasthan discom jurisdictions (JVVNL, AVVNL, JdVVNL). Statutorily approved CPOs must publish live telemetry.',
         scrapedSuccessfully: true,
@@ -694,73 +1074,25 @@ export class ResearchOrchestrator {
       },
       {
         id: 'src-2',
-        url: 'https://energy.rajasthan.gov.in/content/raj/energy/rrecl/en/ev-policy.html',
-        domain: 'energy.rajasthan.gov.in',
-        title: 'Rajasthan Renewable Energy Corporation - Rajasthan EV Policy 2026',
-        discoveredBy: 'investigator',
-        authority: 'OFFICIAL_GOV',
-        retrievedAt: new Date(Date.now() - 95000).toISOString(),
-        snippet: 'State nodal agency directive establishing standard commercial EV charging tariff ceiling of ₹14.50/kWh for commercial CPOs operating within municipal corporation boundaries.',
-        scrapedSuccessfully: true,
-        wordCount: 890,
-      },
-      {
-        id: 'src-3',
         url: 'https://tatapowerev.com/charging-stations/rajasthan',
         domain: 'tatapowerev.com',
         title: 'Tata Power EZ Charge - Rajasthan Network & Station Locator',
         discoveredBy: 'explorer',
-        authority: 'PRIMARY_COMPANY',
-        retrievedAt: new Date(Date.now() - 80000).toISOString(),
+        authority: 'PRIMARY_ENTITY',
+        retrievedAt: new Date().toISOString(),
         snippet: 'Operating 68 fast chargers across Jaipur, Jodhpur, Udaipur, Ajmer, and Delhi-Jaipur NH-48 corridor. Supported standards: Dual CCS2 60kW/120kW, 7.4kW AC Type 2.',
         scrapedSuccessfully: true,
         wordCount: 650,
-      },
-      {
-        id: 'src-4',
-        url: 'https://kazam.in/ev-charging-stations/rajasthan',
-        domain: 'kazam.in',
-        title: 'Kazam EV - Rajasthan Urban & Fleet Charging Grid',
-        discoveredBy: 'explorer',
-        authority: 'PRIMARY_COMPANY',
-        retrievedAt: new Date(Date.now() - 65000).toISOString(),
-        snippet: 'Installed 120+ IoT-enabled AC and DC charging hubs in Jaipur, Kota, and Alwar. Integrated with Rajasthan Discom smart metering grid.',
-        scrapedSuccessfully: true,
-        wordCount: 520,
-      },
-      {
-        id: 'src-5',
-        url: 'https://chargenetwork.in/directory/rajasthan',
-        domain: 'chargenetwork.in',
-        title: 'ChargeNetwork India - Independent CPO Aggregator Directory',
-        discoveredBy: 'explorer',
-        authority: 'AGGREGATOR',
-        retrievedAt: new Date(Date.now() - 50000).toISOString(),
-        snippet: 'Directory listing third-party CPO tariffs in Rajasthan. Tata Power listed at ₹18.00/kWh, Ather Grid listed at ₹12.00/kWh, Statiq listed at ₹15.50/kWh.',
-        scrapedSuccessfully: true,
-        wordCount: 380,
-      },
-      {
-        id: 'src-6',
-        url: 'https://statiq.in/stations/jaipur',
-        domain: 'statiq.in',
-        title: 'Statiq EV Charging Network - Official Rajasthan Fleet Hubs',
-        discoveredBy: 'investigator',
-        authority: 'PRIMARY_COMPANY',
-        retrievedAt: new Date(Date.now() - 35000).toISOString(),
-        snippet: 'Official tariff for Statiq Jaipur Hubs: ₹14.50/kWh off-peak, ₹16.00/kWh peak. Real-time slot reservation active via Statiq app.',
-        scrapedSuccessfully: true,
-        wordCount: 610,
       }
     ] : [
       {
         id: 'src-1',
         url: 'https://cursor.com/pricing',
         domain: 'cursor.com',
-        title: 'Cursor - Pricing and Model Specifications (2026)',
+        title: 'Cursor - Pricing and Model Specifications',
         discoveredBy: 'explorer',
-        authority: 'PRIMARY_COMPANY',
-        retrievedAt: new Date(Date.now() - 110000).toISOString(),
+        authority: 'PRIMARY_ENTITY',
+        retrievedAt: new Date().toISOString(),
         snippet: 'Pro plan at $20/month with 500 fast requests. Includes frontier models: Claude 3.7 Sonnet, GPT-4o, and Gemini 2.5 Flash with deep background indexing.',
         scrapedSuccessfully: true,
         wordCount: 940,
@@ -771,721 +1103,128 @@ export class ResearchOrchestrator {
         domain: 'github.com',
         title: 'GitHub Copilot Enterprise - Multi-Model Architecture',
         discoveredBy: 'investigator',
-        authority: 'PRIMARY_COMPANY',
-        retrievedAt: new Date(Date.now() - 90000).toISOString(),
+        authority: 'PRIMARY_ENTITY',
+        retrievedAt: new Date().toISOString(),
         snippet: 'Copilot Pro at $10/month and Business at $19/user/month. Enterprise tier enables runtime multi-model switching between Anthropic, OpenAI, and Google models.',
         scrapedSuccessfully: true,
         wordCount: 1320,
-      },
-      {
-        id: 'src-3',
-        url: 'https://windsurf.codeium.com/pricing',
-        domain: 'windsurf.codeium.com',
-        title: 'Windsurf by Codeium - Cascade Agentic IDE Tier Specs',
-        discoveredBy: 'investigator',
-        authority: 'PRIMARY_COMPANY',
-        retrievedAt: new Date(Date.now() - 60000).toISOString(),
-        snippet: 'Cascade flow-state coding agent with real-time multi-file editing and collaborative terminal execution. Free tier + $15/month Pro tier.',
-        scrapedSuccessfully: true,
-        wordCount: 780,
       }
     ];
 
-    // Stream search & discovery events
     for (const src of sources) {
-      await sleep(350);
-      this.emit('search_query', `${src.discoveredBy === 'explorer' ? 'Explorer' : 'Investigator'} querying: "${src.domain} ${plan.requiredFields[0]}"`, src.discoveredBy);
-      await sleep(300);
+      await sleep(200);
       this.emit('source_found', `${src.discoveredBy === 'explorer' ? 'Explorer' : 'Investigator'} discovered: ${src.domain} (${src.authority})`, src.discoveredBy, { source: src });
-      await sleep(250);
-      this.emit('scrape_completed', `Scraped ${src.wordCount} words from ${src.domain}`, src.discoveredBy, { scraped: src });
     }
 
-    await sleep(400);
-    this.emit('claim_found', 'Explorer extracted 18 candidate claims across 6 target entities', 'explorer');
-    this.emit('verification_started', 'Investigator cross-referencing tariff rates against Rajasthan Energy Department filings', 'investigator');
-
-    // Conflict occurrence
-    await sleep(600);
-    const conflicts: ConflictItem[] = isEvQuery ? [
-      {
-        id: 'cfl-101',
-        entityName: 'Tata Power EZ Charge',
-        fieldName: 'Tariff Pricing (₹/kWh)',
-        explorerClaim: {
-          value: '₹18.00 / kWh',
-          sourceUrl: 'https://chargenetwork.in/directory/rajasthan',
-          sourceTitle: 'ChargeNetwork India - Independent CPO Aggregator Directory',
-          authority: 'AGGREGATOR',
-          snippet: 'Directory lists standard fast charging rate at ₹18.00/kWh inclusive of GST.',
-        },
-        investigatorClaim: {
-          value: '₹14.50 / kWh',
-          sourceUrl: 'https://energy.rajasthan.gov.in/content/raj/energy/rrecl/en/ev-policy.html',
-          sourceTitle: 'Rajasthan Renewable Energy Corporation - Rajasthan EV Policy 2026',
-          authority: 'OFFICIAL_GOV',
-          snippet: 'Section 4.2: Maximum ceiling rate for public CPO fast chargers capped at ₹14.50/kWh during non-peak hours in discom areas.',
-        },
-        natureOfConflict: 'Aggregator directory quotes outdated ₹18/kWh rate, whereas official Rajasthan State Nodal Agency gazette mandates statutory ceiling of ₹14.50/kWh.',
-        escalatedToWebSearch: true,
-        targetedQuery: '"Tata Power EZ Charge" Rajasthan tariff 2026 official DISCOM ceiling',
-        newEvidenceDiscovered: 'Tata Power official Rajasthan station bulletin confirms compliance with State Nodal Agency ceiling: base tariff ₹14.50/kWh + parking where applicable.',
-        arbiterDecision: 'INVESTIGATOR_SELECTED',
-        finalValue: '₹14.50 / kWh (Gov Ceiling Compliant)',
-        decisionBasis: 'Official Gov Nodal Gazette + Primary CPO Station Bulletin overrides third-party aggregator directory.',
-        resolutionStatus: 'RESOLVED',
-      },
-      {
-        id: 'cfl-102',
-        entityName: 'Statiq EV Network',
-        fieldName: 'Cities Served',
-        explorerClaim: {
-          value: 'Jaipur & Udaipur only',
-          sourceUrl: 'https://chargenetwork.in/directory/rajasthan',
-          sourceTitle: 'ChargeNetwork Directory',
-          authority: 'AGGREGATOR',
-          snippet: 'Statiq active in 2 major cities in Rajasthan.',
-        },
-        investigatorClaim: {
-          value: 'Jaipur, Jodhpur, Udaipur, Kota, Alwar',
-          sourceUrl: 'https://statiq.in/stations/jaipur',
-          sourceTitle: 'Statiq EV Charging Network - Official Rajasthan Fleet Hubs',
-          authority: 'PRIMARY_COMPANY',
-          snippet: 'Live app map confirms commercial DC fast chargers deployed across 5 cities in Rajasthan.',
-        },
-        natureOfConflict: 'Directory listing is outdated and missed 3 newly commissioned cities in 2026 expansion.',
-        escalatedToWebSearch: true,
-        targetedQuery: '"Statiq" station deployment Rajasthan 2026 live cities',
-        newEvidenceDiscovered: 'Primary telemetry confirmed operational chargers active in Kota and Alwar as of February 2026.',
-        arbiterDecision: 'INVESTIGATOR_SELECTED',
-        finalValue: 'Jaipur, Jodhpur, Udaipur, Kota, Alwar (5 Cities)',
-        decisionBasis: 'Primary company live telemetry and station locator supersedes outdated aggregator snapshot.',
-        resolutionStatus: 'RESOLVED',
-      }
-    ] : [
-      {
-        id: 'cfl-201',
-        entityName: 'Windsurf by Codeium',
-        fieldName: 'Monthly Pricing',
-        explorerClaim: {
-          value: '$20 / month',
-          sourceUrl: 'https://techblog.example/ai-ide-roundup',
-          sourceTitle: 'AI IDE Roundup Blog',
-          authority: 'SECONDARY_MEDIA',
-          snippet: 'Windsurf Pro tier estimated at $20/month alongside Cursor.',
-        },
-        investigatorClaim: {
-          value: '$15 / month (Pro)',
-          sourceUrl: 'https://windsurf.codeium.com/pricing',
-          sourceTitle: 'Windsurf Official Pricing Page',
-          authority: 'PRIMARY_COMPANY',
-          snippet: 'Official pricing states Pro is $15/month billed monthly, or $10/month billed annually.',
-        },
-        natureOfConflict: 'Secondary tech blog assumed uniform $20/mo pricing across competitors, contradicting official billing page.',
-        escalatedToWebSearch: true,
-        targetedQuery: 'site:windsurf.codeium.com pricing official Pro tier',
-        newEvidenceDiscovered: 'Official checkout page confirms $15/month monthly billing.',
-        arbiterDecision: 'INVESTIGATOR_SELECTED',
-        finalValue: '$15 / month',
-        decisionBasis: 'Primary company billing documentation directly contradicts secondary blog speculation.',
-        resolutionStatus: 'RESOLVED',
-      }
-    ];
-
-    this.emit('arbiter_started', 'Research Arbiter activated: Comparing 18 claims across 6 sources', 'arbiter');
-    await sleep(400);
-
-    for (const c of conflicts) {
-      this.emit('conflict_detected', `Discrepancy found: ${c.entityName} [${c.fieldName}] - Explorer (${c.explorerClaim.value}) vs Investigator (${c.investigatorClaim.value})`, 'arbiter', { conflict: c });
-      await sleep(450);
-      this.emit('escalation_started', `Arbiter initiating targeted escalation research: "${c.targetedQuery}"`, 'arbiter');
-      await sleep(550);
-      this.emit('escalation_completed', `Targeted verification completed. Arbiter decision: ${c.decisionBasis}`, 'arbiter');
-      await sleep(350);
-      this.emit('arbiter_decision', `Arbiter confirmed final value: "${c.finalValue}" for ${c.entityName}`, 'arbiter');
-    }
-
-    // Construct high-value entities
     const entities: DiscoveredEntity[] = isEvQuery ? [
       {
         id: 'ent-1',
         name: 'Tata Power EZ Charge',
         category: 'Tier-1 CPO Network',
-        location: 'Jaipur, Jodhpur, Udaipur, Ajmer, NH-48 Corridor',
+        location: 'Jaipur, Jodhpur, Udaipur, Ajmer',
         fields: {
           'Cities Served': {
             value: 'Jaipur, Jodhpur, Udaipur, Ajmer, Kota (68 Stations)',
             verifiedStatus: 'VERIFIED',
             sourceUrl: 'https://tatapowerev.com/charging-stations/rajasthan',
             sourceTitle: 'Tata Power EZ Charge Official Station Locator',
-            authority: 'PRIMARY_COMPANY',
+            authority: 'PRIMARY_ENTITY',
             evidenceStrength: 98,
-            snippet: '68 operational public fast chargers across key urban hubs and Delhi-Mumbai Expressway Rajasthan stretch.',
+            snippet: '68 operational public fast chargers across key urban hubs.',
             resolvedBy: 'CONSENSUS',
             decisionBasis: 'Corroborated by BEE Registry and primary station telemetry.',
           },
-          'Charger Types': {
-            value: 'Dual CCS2 (60kW / 120kW DC), Type-2 AC (7.4kW / 22kW)',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://tatapowerev.com/charging-stations/rajasthan',
-            sourceTitle: 'Tata Power EZ Charge Specs',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 95,
-            snippet: 'High-speed DC dual guns supporting 800V architecture alongside Level 2 AC commercial chargers.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Primary equipment specification verified.',
-          },
           'Tariff Pricing': {
-            value: '₹14.50 / kWh (Regulated Ceiling)',
+            value: '₹14.50 / kWh',
             verifiedStatus: 'VERIFIED',
             sourceUrl: 'https://energy.rajasthan.gov.in/content/raj/energy/rrecl/en/ev-policy.html',
             sourceTitle: 'Rajasthan Renewable Energy Corporation Official Tariff Gazette',
-            authority: 'OFFICIAL_GOV',
+            authority: 'GOVERNMENT_STATUTORY',
             evidenceStrength: 99,
             snippet: 'Statutory ceiling price enforced by state nodal agency.',
             resolvedBy: 'INVESTIGATOR_SELECTED',
             decisionBasis: 'Official state gazette overrides third-party aggregator listing.',
           },
-          'Official Contact': {
-            value: 'customercare@tatapower.com | 1800 209 5161',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://tatapowerev.com',
-            sourceTitle: 'Tata Power Official Portal',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 100,
-            snippet: '24x7 toll-free helpline and national customer grievance desk.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Direct official contact directory.',
-          },
-          'Operational Status': {
-            value: 'Active / Telemetry Connected to BEE',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://beeindia.gov.in',
-            sourceTitle: 'Bureau of Energy Efficiency National Registry',
-            authority: 'OFFICIAL_GOV',
-            evidenceStrength: 96,
-            snippet: 'National portal status: Synchronized real-time status with DISCOM metering.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Government registry verification.',
-          }
         },
         overallStatus: 'VERIFIED',
-        evidenceCoverage: 100,
-      },
-      {
-        id: 'ent-2',
-        name: 'Statiq EV Network',
-        category: 'Commercial Fast Charging',
-        location: 'Jaipur, Jodhpur, Udaipur, Kota, Alwar',
-        fields: {
-          'Cities Served': {
-            value: 'Jaipur, Jodhpur, Udaipur, Kota, Alwar (5 Cities)',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://statiq.in/stations/jaipur',
-            sourceTitle: 'Statiq Official Rajasthan Network Map',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 94,
-            snippet: 'Commercial DC hubs active across 5 primary Rajasthan cities.',
-            resolvedBy: 'INVESTIGATOR_SELECTED',
-            decisionBasis: 'Primary station map confirmed 5 operational municipal zones.',
-          },
-          'Charger Types': {
-            value: 'CCS2 50kW / 120kW DC Fast, Bharat AC001',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://statiq.in',
-            sourceTitle: 'Statiq Technical Specifications',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 92,
-            snippet: 'Standardized CCS2 connectors with dual-gun dynamic load balancing.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Primary hardware datasheet.',
-          },
-          'Tariff Pricing': {
-            value: '₹14.50 - ₹16.00 / kWh (Time of Day)',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://statiq.in/stations/jaipur',
-            sourceTitle: 'Statiq Live App Station Tariff',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 91,
-            snippet: 'Off-peak rate ₹14.50/kWh, peak evening tariff ₹16.00/kWh.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Verified through live app pricing query.',
-          },
-          'Official Contact': {
-            value: 'support@statiq.in | +91 80 6902 4444',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://statiq.in',
-            sourceTitle: 'Statiq Corporate Contact',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 97,
-            snippet: 'Registered CPO support operations based in India.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Verified corporate listing.',
-          },
-          'Operational Status': {
-            value: 'Active / Commercial Public Access',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://beeindia.gov.in',
-            sourceTitle: 'BEE Charging Portal',
-            authority: 'OFFICIAL_GOV',
-            evidenceStrength: 95,
-            snippet: 'Registered in National CPO directory.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Government database match.',
-          }
-        },
-        overallStatus: 'VERIFIED',
-        evidenceCoverage: 100,
-      },
-      {
-        id: 'ent-3',
-        name: 'Kazam EV Energy',
-        category: 'Urban & Destination CPO',
-        location: 'Jaipur, Kota, Alwar, Bhilwara',
-        fields: {
-          'Cities Served': {
-            value: 'Jaipur, Kota, Alwar, Bhilwara (120+ Points)',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://kazam.in/ev-charging-stations/rajasthan',
-            sourceTitle: 'Kazam Rajasthan Deployment Index',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 93,
-            snippet: 'Dense distribution of AC destination chargers and rapid DC hubs in Rajasthan tier-2 cities.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Corroborated by DISCOM grid tie-in records.',
-          },
-          'Charger Types': {
-            value: '3.3kW AC Kazam Mini, 7.4kW Type-2, 30kW DC Fast',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://kazam.in',
-            sourceTitle: 'Kazam Hardware Specifications',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 90,
-            snippet: 'Proprietary IoT charge point controllers with OCPP 1.6J compliance.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Hardware specification document.',
-          },
-          'Tariff Pricing': {
-            value: '₹12.00 - ₹14.00 / kWh',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://kazam.in',
-            sourceTitle: 'Kazam Charging Tariff Sheet',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 89,
-            snippet: 'Base AC rate ₹12/kWh, DC fast chargers billed at ₹14/kWh.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Direct provider tariff schedule.',
-          },
-          'Official Contact': {
-            value: 'info@kazam.in | +91 99533 13322',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://kazam.in',
-            sourceTitle: 'Kazam Communications',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 95,
-            snippet: 'Customer support hotline and business partnership desk.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Primary website verification.',
-          },
-          'Operational Status': {
-            value: 'Active / Fleet & Public',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://beeindia.gov.in',
-            sourceTitle: 'BEE Portal Registry',
-            authority: 'OFFICIAL_GOV',
-            evidenceStrength: 94,
-            snippet: 'Active registered entity on state renewable energy platform.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'State registry validation.',
-          }
-        },
-        overallStatus: 'VERIFIED',
-        evidenceCoverage: 100,
-      },
-      {
-        id: 'ent-4',
-        name: 'Jio-bp pulse',
-        category: 'Highway & Urban Expressway Hubs',
-        location: 'Delhi-Jaipur Expressway, Jaipur City, Ajmer Bypass',
-        fields: {
-          'Cities Served': {
-            value: 'Jaipur, Ajmer, National Highway 48',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://www.jiobp.com/ev-charging',
-            sourceTitle: 'Jio-bp pulse Official Highway Locator',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 96,
-            snippet: 'High-throughput mobility hubs located at Jio-bp retail outlets along Rajasthan highway corridors.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Verified through official retail locator.',
-          },
-          'Charger Types': {
-            value: '60kW & 120kW Dual CCS2 Fast Chargers',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://www.jiobp.com/ev-charging',
-            sourceTitle: 'Jio-bp pulse Technical Overview',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 94,
-            snippet: 'Ultra-fast DC charging hubs equipped with liquid-cooled cables and dual dispensers.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Primary documentation.',
-          },
-          'Tariff Pricing': {
-            value: '₹15.20 / kWh',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://www.jiobp.com',
-            sourceTitle: 'Jio-bp pulse Live Pricing',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 92,
-            snippet: 'Standard DC fast tariff across Rajasthan national highway hubs.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Station live billing query.',
-          },
-          'Official Contact': {
-            value: 'pulse.care@jiobp.com | 1800 891 9023',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://www.jiobp.com',
-            sourceTitle: 'Jio-bp Contact Portal',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 98,
-            snippet: 'Dedicated 24/7 EV driver support hotline.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Official support portal.',
-          },
-          'Operational Status': {
-            value: 'Active / High-Capacity Hub',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://beeindia.gov.in',
-            sourceTitle: 'BEE Portal National Database',
-            authority: 'OFFICIAL_GOV',
-            evidenceStrength: 95,
-            snippet: 'Verified state energy department grid connection.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Official database corroboration.',
-          }
-        },
-        overallStatus: 'VERIFIED',
-        evidenceCoverage: 100,
-      },
-      {
-        id: 'ent-5',
-        name: 'Ather Grid',
-        category: 'Two-Wheeler Dedicated Fast Charging',
-        location: 'Jaipur, Jodhpur, Udaipur, Kota, Bikaner',
-        fields: {
-          'Cities Served': {
-            value: 'Jaipur, Jodhpur, Udaipur, Kota, Bikaner (38 Hubs)',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://atherenergy.com/charging',
-            sourceTitle: 'Ather Grid National Coverage',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 95,
-            snippet: 'Proprietary fast charging points installed at key cafes, tech parks, and commercial markets in 5 Rajasthan cities.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Primary live app locator verified.',
-          },
-          'Charger Types': {
-            value: 'Ather Fast Point (LEVO / Bharat LEV DC)',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://atherenergy.com/charging',
-            sourceTitle: 'Ather Hardware Docs',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 92,
-            snippet: 'Dedicated two-wheeler fast DC connector charging up to 1.5 km/min.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Hardware technical documentation.',
-          },
-          'Tariff Pricing': {
-            value: '₹1.00/min + GST (or Monthly Subscription)',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://atherenergy.com',
-            sourceTitle: 'Ather Energy Subscription Terms',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 94,
-            snippet: 'Time-based billing model calibrated for light electric vehicle charging profiles.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Primary terms of service.',
-          },
-          'Official Contact': {
-            value: 'grid.support@atherenergy.com | +91 76766 09900',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://atherenergy.com',
-            sourceTitle: 'Ather Support Portal',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 98,
-            snippet: 'Direct 24/7 in-app and telephone customer assistance.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Direct support directory.',
-          },
-          'Operational Status': {
-            value: 'Active / 2W Network Standard',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://beeindia.gov.in',
-            sourceTitle: 'BEE Portal EV Light Vehicle Registry',
-            authority: 'OFFICIAL_GOV',
-            evidenceStrength: 93,
-            snippet: 'Listed on national bureau light EV infrastructure register.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Regulatory registry verification.',
-          }
-        },
-        overallStatus: 'VERIFIED',
-        evidenceCoverage: 100,
+        evidenceCoverage: 80,
       }
     ] : [
       {
         id: 'ent-1',
-        name: 'Cursor (Anysphere)',
-        category: 'Autonomous Code Editor',
-        location: 'Global / Multi-Platform',
-        fields: {
-          'Supported Models': {
-            value: 'Claude 3.7 Sonnet, GPT-4o, Cursor-Small, Gemini 2.5 Flash',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://cursor.com',
-            sourceTitle: 'Cursor Official Feature Guide',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 98,
-            snippet: 'Supports dynamic multi-model frontier routing with custom API key pass-through.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Official product documentation.',
-          },
-          'Monthly Pricing': {
-            value: '$20 / month (Pro) | $40 / month (Business)',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://cursor.com/pricing',
-            sourceTitle: 'Cursor Official Billing Page',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 99,
-            snippet: '500 fast requests/mo included in Pro tier with unlimited slow requests.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Primary billing terms.',
-          },
-          'Context Window': {
-            value: 'Up to 200,000 tokens (Repository Indexing)',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://cursor.com',
-            sourceTitle: 'Cursor Indexing Documentation',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 95,
-            snippet: 'Vector-based codebase embeddings indexing local repository AST and git history.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Direct technical specification.',
-          },
-          'Autonomous Execution Mode': {
-            value: 'Agentic multi-file composer with terminal execution',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://cursor.com',
-            sourceTitle: 'Cursor Composer Docs',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 97,
-            snippet: 'Full autonomous composer loop with linter inspection and test execution.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Primary feature verification.',
-          },
-          'Primary Documentation': {
-            value: 'https://docs.cursor.com',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://docs.cursor.com',
-            sourceTitle: 'Cursor Docs Portal',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 100,
-            snippet: 'Official developer documentation and API changelog.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Verified canonical URL.',
-          }
-        },
-        overallStatus: 'VERIFIED',
-        evidenceCoverage: 100,
-      },
-      {
-        id: 'ent-2',
-        name: 'Windsurf (Codeium)',
-        category: 'Collaborative Agentic IDE',
+        name: 'Cursor',
+        category: 'AI Code Editor',
         location: 'Global',
         fields: {
           'Supported Models': {
-            value: 'Claude 3.5/3.7 Sonnet, GPT-4o, DeepSeek-V3',
+            value: 'Claude 3.7 Sonnet, GPT-4o, Gemini 2.5 Flash',
             verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://windsurf.codeium.com',
-            sourceTitle: 'Windsurf Official Release Notes',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 96,
-            snippet: 'Cascade agent framework leveraging hybrid frontier inference models.',
+            sourceUrl: 'https://cursor.com/pricing',
+            sourceTitle: 'Cursor Pricing',
+            authority: 'PRIMARY_ENTITY',
+            evidenceStrength: 98,
+            snippet: 'Includes frontier models with deep background codebase indexing.',
             resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Primary product changelog.',
+            decisionBasis: 'Verified against primary billing page.',
           },
           'Monthly Pricing': {
-            value: '$15 / month (Pro)',
+            value: '$20 / month (Pro)',
             verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://windsurf.codeium.com/pricing',
-            sourceTitle: 'Windsurf Pricing Tier Specification',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 99,
-            snippet: 'Pro plan provides priority access to Cascade and multi-file reasoning engine.',
-            resolvedBy: 'INVESTIGATOR_SELECTED',
-            decisionBasis: 'Primary billing page overrides secondary review blog estimates.',
-          },
-          'Context Window': {
-            value: '128,000+ tokens with live workspace cache',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://windsurf.codeium.com',
-            sourceTitle: 'Codeium Context Cache Docs',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 92,
-            snippet: 'Synchronized AST parsing with local variable tracing.',
+            sourceUrl: 'https://cursor.com/pricing',
+            sourceTitle: 'Cursor Pricing',
+            authority: 'PRIMARY_ENTITY',
+            evidenceStrength: 98,
+            snippet: 'Pro plan at $20/month with 500 fast requests.',
             resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Verified developer docs.',
-          },
-          'Autonomous Execution Mode': {
-            value: 'Cascade autonomous action loop & terminal bridge',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://windsurf.codeium.com',
-            sourceTitle: 'Cascade Flow State Overview',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 95,
-            snippet: 'Autonomous tool calling for terminal commands, test verification, and file diffs.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Official feature manual.',
-          },
-          'Primary Documentation': {
-            value: 'https://docs.codeium.com/windsurf',
-            verifiedStatus: 'VERIFIED',
-            sourceUrl: 'https://docs.codeium.com',
-            sourceTitle: 'Codeium Knowledgebase',
-            authority: 'PRIMARY_COMPANY',
-            evidenceStrength: 100,
-            snippet: 'Official architecture and getting started guides.',
-            resolvedBy: 'CONSENSUS',
-            decisionBasis: 'Direct link verification.',
+            decisionBasis: 'Verified against primary billing page.',
           }
         },
         overallStatus: 'VERIFIED',
-        evidenceCoverage: 100,
+        evidenceCoverage: 85,
       }
     ];
 
-    // Collect claims
-    const claims: ExtractedClaim[] = [];
-    for (const ent of entities) {
-      for (const [k, v] of Object.entries(ent.fields)) {
-        claims.push({
-          id: `clm-${Math.random().toString(36).substring(2, 9)}`,
-          entityName: ent.name,
-          fieldName: k,
-          value: v.value,
-          sourceUrl: v.sourceUrl,
-          sourceTitle: v.sourceTitle,
-          sourceAuthority: v.authority,
-          supportingSnippet: v.snippet,
-          discoveredBy: v.resolvedBy === 'INVESTIGATOR_SELECTED' ? 'investigator' : 'explorer',
-          confidenceScore: v.evidenceStrength / 100,
-          retrievedAt: new Date().toISOString(),
-          verificationStatus: v.verifiedStatus,
-        });
+    const claims: ExtractedClaim[] = [
+      {
+        id: 'clm-demo-1',
+        entityName: entities[0].name,
+        fieldName: 'Primary Attribute',
+        value: Object.values(entities[0].fields)[0].value,
+        sourceUrl: sources[0].url,
+        sourceTitle: sources[0].title,
+        sourceAuthority: sources[0].authority,
+        supportingSnippet: sources[0].snippet,
+        discoveredBy: 'explorer',
+        confidenceScore: 0.95,
+        retrievedAt: new Date().toISOString(),
+        verificationStatus: 'VERIFIED',
       }
-    }
+    ];
 
-    // Adaptive dashboard specification
-    await sleep(400);
-    this.emit('visualizer_started', 'Visualizer constructing dynamic evidence widgets and telemetry charts', 'visualizer');
-    await sleep(500);
-
-    const dashboardSpec: DashboardSpec = isEvQuery ? {
-      headline: 'Rajasthan Public EV Charging Operators: Verified Infrastructure & Tariff Index',
-      summary: 'Verified comparative analysis across 5 major charging network operators operating in Rajasthan discom jurisdictions. Confirms 100% adherence to state nodal ceiling tariffs after reconciling aggregator discrepancies.',
+    const dashboardSpec: DashboardSpec = {
+      headline: 'Executive Intelligence Briefing [SHOWCASE MODE]',
+      summary: 'Demonstration dataset showing verified evidentiary records with multi-agent checks and balances.',
       metrics: [
-        { label: 'Verified CPO Networks', value: entities.length, description: 'Statutorily active in Rajasthan', tone: 'positive' },
-        { label: 'Primary Evidence Ratio', value: '83.3%', description: 'Gov & Official Operator Sources', tone: 'positive' },
-        { label: 'Tariff Discrepancies Resolved', value: conflicts.length, description: 'Overridden using State Gazette', tone: 'warning' },
-        { label: 'Coverage Confidence', value: '96.2%', description: 'Corroborated by BEE registry', tone: 'positive' },
+        { label: 'Audited Entities', value: entities.length, description: 'Structured records', tone: 'positive' },
+        { label: 'Verified Sources', value: sources.length, description: 'Primary sources', tone: 'positive' },
+        { label: 'Verification Rate', value: '100%', description: 'Primary corroborated', tone: 'positive' }
       ],
-      charts: [
-        {
-          id: 'chart-pricing',
-          title: 'Tariff Rate Comparison (₹ / kWh)',
-          chartType: 'bar',
-          dataKey: 'rate',
-          xAxisKey: 'operator',
-          description: 'Official verified base tariffs across public charging stations',
-          data: [
-            { operator: 'Tata Power', rate: 14.50 },
-            { operator: 'Statiq', rate: 15.25 },
-            { operator: 'Kazam EV', rate: 13.00 },
-            { operator: 'Jio-bp pulse', rate: 15.20 },
-            { operator: 'Ather Grid (equiv)', rate: 12.50 },
-          ],
-        },
-        {
-          id: 'chart-authority',
-          title: 'Evidence Provenance by Source Tier',
-          chartType: 'pie',
-          dataKey: 'count',
-          xAxisKey: 'tier',
-          description: 'Breakdown of primary government vs corporate vs aggregator evidence',
-          data: [
-            { tier: 'Official Gov Gazettes', count: 2 },
-            { tier: 'Primary Operator Telemetry', count: 3 },
-            { tier: 'Secondary Aggregators', count: 1 },
-          ],
-        },
-      ],
+      charts: [],
       tableColumns: [
-        { key: 'name', label: 'Operator / CPO', type: 'text' },
-        { key: 'cities', label: 'Cities Served', type: 'text' },
-        { key: 'chargers', label: 'Charger Hardware', type: 'text' },
-        { key: 'pricing', label: 'Verified Tariff', type: 'status' },
-        { key: 'contact', label: 'Official Helpline', type: 'text' },
-        { key: 'status', label: 'Evidence Coverage', type: 'number' },
+        { key: 'name', label: 'Entity Name', type: 'text' },
+        { key: 'status', label: 'Status', type: 'status' }
       ],
-      unverifiedObservations: [
-        'Private residential charging sockets managed by local RWAs in Jaipur were excluded due to lack of statutory public access telemetry.',
-        'Real-time charger plug availability fluctuates second-by-second and requires direct OCPP live stream integration for live occupancy guarantees.',
-      ],
-    } : {
-      headline: 'Autonomous Coding Agents & Developer Tools: 2026 Production Tier Evaluation',
-      summary: 'Reconciled capability matrix for leading agentic coding environments. Analyzed pricing tiers, multi-model support, context horizons, and autonomous execution safety.',
-      metrics: [
-        { label: 'Verified Tools', value: entities.length, description: 'Active 2026 developer platforms', tone: 'positive' },
-        { label: 'Primary Docs Verified', value: '100%', description: 'Verified against canonical domains', tone: 'positive' },
-        { label: 'Pricing Conflict Resolved', value: conflicts.length, description: 'Reconciled via checkout portal', tone: 'warning' },
-        { label: 'Context Coverage', value: '100%', description: 'Full architectural context checked', tone: 'positive' },
-      ],
-      charts: [
-        {
-          id: 'chart-pricing-tools',
-          title: 'Monthly Subscription Cost ($ / Month)',
-          chartType: 'bar',
-          dataKey: 'price',
-          xAxisKey: 'tool',
-          description: 'Official individual developer Pro tier pricing',
-          data: [
-            { tool: 'Cursor Pro', price: 20 },
-            { tool: 'Windsurf Pro', price: 15 },
-          ],
-        },
-      ],
-      tableColumns: [
-        { key: 'name', label: 'Developer Tool', type: 'text' },
-        { key: 'models', label: 'Supported Models', type: 'text' },
-        { key: 'pricing', label: 'Monthly Price', type: 'status' },
-        { key: 'context', label: 'Context Horizon', type: 'text' },
-        { key: 'execution', label: 'Autonomous Loop', type: 'text' },
-      ],
-      unverifiedObservations: [
-        'Internal token cost per autonomous background invocation varies based on user codebase size and cannot be statically guaranteed.',
-      ],
+      unverifiedObservations: [],
     };
 
-    this.emit('dashboard_generated', 'Visualizer produced verified intelligence dashboard and provenance charts', 'visualizer', { dashboardSpec });
-    this.emit('research_completed', `ResearchLens AI investigation complete. ${entities.length} entities verified across ${sources.length} sources with 0 hallucinated claims.`);
+    this.emit('research_completed', `Showcase research completed: ${entities.length} entities verified.`);
 
     return {
       plan,
       sources,
       entities,
       claims,
-      conflicts,
+      conflicts: [],
       dashboardSpec,
       isDemoMode: true,
     };

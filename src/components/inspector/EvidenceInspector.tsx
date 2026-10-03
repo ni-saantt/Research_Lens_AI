@@ -19,7 +19,8 @@ import {
   Award,
   Layers
 } from 'lucide-react';
-import { DiscoveredSource, ExtractedClaim, ConflictItem, SourceAuthority } from '../../types/research';
+import { DiscoveredSource, ExtractedClaim, ConflictItem, SourceAuthority, ClaimVerificationStatus } from '../../types/research';
+import { getStatusBadgeConfig, getAuthorityBadgeConfig } from '../../utils/statusHelpers';
 
 interface EvidenceInspectorProps {
   selectedItem: any;
@@ -40,18 +41,13 @@ export function EvidenceInspector({ selectedItem, onClose }: EvidenceInspectorPr
   }
 
   const getAuthorityBadge = (auth: SourceAuthority) => {
-    switch (auth) {
-      case 'OFFICIAL_GOV':
-        return <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/70 border border-emerald-800/60 px-2 py-0.5 rounded">Official Gov / Statutory</span>;
-      case 'PRIMARY_COMPANY':
-        return <span className="text-[10px] font-mono text-cyan-400 bg-cyan-950/70 border border-cyan-800/60 px-2 py-0.5 rounded">Primary Company Portal</span>;
-      case 'ACADEMIC_INDUSTRY':
-        return <span className="text-[10px] font-mono text-indigo-400 bg-indigo-950/70 border border-indigo-800/60 px-2 py-0.5 rounded">Academic / Peer-Reviewed</span>;
-      case 'SECONDARY_MEDIA':
-        return <span className="text-[10px] font-mono text-amber-400 bg-amber-950/70 border border-amber-800/60 px-2 py-0.5 rounded">Secondary Press Media</span>;
-      default:
-        return <span className="text-[10px] font-mono text-neutral-400 bg-neutral-900 border border-neutral-800 px-2 py-0.5 rounded">Aggregator Directory</span>;
-    }
+    const cfg = getAuthorityBadgeConfig(auth);
+    return <span className={`text-[10px] font-mono px-2 py-0.5 rounded ${cfg.badgeClass}`}>{cfg.label}</span>;
+  };
+
+  const getStatusBadge = (status: ClaimVerificationStatus | string) => {
+    const cfg = getStatusBadgeConfig(status);
+    return <span className={`text-[10px] font-mono px-2 py-0.5 rounded ${cfg.badgeClass}`}>{cfg.label}</span>;
   };
 
   // 1. Conflict View
@@ -188,11 +184,11 @@ export function EvidenceInspector({ selectedItem, onClose }: EvidenceInspectorPr
             <div key={fName} className="p-3 rounded-lg bg-neutral-900/70 border border-neutral-800/80 space-y-1.5">
               <div className="flex items-center justify-between text-[10px] font-mono">
                 <span className="text-neutral-400 font-semibold uppercase">{fName}</span>
-                <span className="text-emerald-400 flex items-center gap-1">
-                  <CheckCircle2 className="w-2.5 h-2.5" /> Verified
-                </span>
+                {getStatusBadge(fData.verifiedStatus)}
               </div>
-              <div className="text-xs font-semibold text-neutral-100">{fData.value}</div>
+              <div className="text-xs font-semibold text-neutral-100">
+                {fData.value !== null ? fData.value : <span className="text-amber-400 font-mono text-[11px] italic">[Insufficient Evidence]</span>}
+              </div>
               
               {fData.sourceUrl && (
                 <a
@@ -287,16 +283,14 @@ export function EvidenceInspector({ selectedItem, onClose }: EvidenceInspectorPr
             <CheckCircle2 className="w-4 h-4 text-emerald-400" />
             <span>Extracted Claim Inspection</span>
           </div>
-          <span className={`text-[10px] font-mono px-2 py-0.5 rounded ${
-            data.verifiedStatus === 'VERIFIED' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-amber-950 text-amber-400 border border-amber-800'
-          }`}>
-            {data.verifiedStatus || 'VERIFIED'}
-          </span>
+          {getStatusBadge(data.verifiedStatus || (data.value === null ? 'INSUFFICIENT_EVIDENCE' : 'VERIFIED'))}
         </div>
 
         <div className="mb-4">
           <div className="text-[10px] font-mono text-neutral-400 uppercase">{selectedItem.fieldName || 'Field Claim'}</div>
-          <div className="text-sm font-semibold text-neutral-100 mt-0.5">{data.value}</div>
+          <div className="text-sm font-semibold text-neutral-100 mt-0.5">
+            {data.value !== null ? data.value : <span className="text-amber-400 font-mono text-xs italic">[Insufficient Authoritative Evidence]</span>}
+          </div>
           {selectedItem.entityName && (
             <div className="text-xs text-neutral-400 mt-0.5">Entity: {selectedItem.entityName}</div>
           )}
@@ -306,16 +300,18 @@ export function EvidenceInspector({ selectedItem, onClose }: EvidenceInspectorPr
         <div className="p-3 rounded-lg bg-neutral-900/80 border border-neutral-800 mb-4">
           <div className="flex items-center justify-between text-[10px] font-mono mb-1.5">
             <span className="text-neutral-400">EVIDENCE STRENGTH</span>
-            <span className="text-emerald-400 font-bold">{data.evidenceStrength || 95}%</span>
+            <span className={data.value !== null && data.evidenceStrength ? 'text-emerald-400 font-bold' : 'text-neutral-500 font-mono'}>
+              {data.value !== null && data.evidenceStrength ? `${data.evidenceStrength}%` : 'N/A (Missing)'}
+            </span>
           </div>
           <div className="w-full h-1.5 bg-neutral-800 rounded-full overflow-hidden">
             <div 
-              className="h-full bg-emerald-500 rounded-full transition-all"
-              style={{ width: `${data.evidenceStrength || 95}%` }}
+              className={`h-full ${data.value !== null ? 'bg-emerald-500' : 'bg-neutral-700'} rounded-full transition-all`}
+              style={{ width: `${data.value !== null && data.evidenceStrength ? data.evidenceStrength : 0}%` }}
             />
           </div>
           <div className="mt-2 text-[10px] text-neutral-400">
-            Decision Basis: <span className="text-neutral-200">{data.decisionBasis || 'Consensus verified by independent agents'}</span>
+            Decision Basis: <span className="text-neutral-200">{data.decisionBasis || (data.value === null ? 'No authoritative disclosure found' : 'Consensus verified by independent agents')}</span>
           </div>
         </div>
 

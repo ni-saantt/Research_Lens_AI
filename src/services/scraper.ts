@@ -22,26 +22,113 @@ export interface ScrapedPageResult {
   errorMessage?: string;
 }
 
-export function classifyAuthority(url: string): SourceAuthority {
+export function classifyAuthority(url: string, targetEntityName?: string): SourceAuthority {
   try {
     const parsed = new URL(url);
     const host = parsed.hostname.toLowerCase();
-    
-    if (host.endsWith('.gov') || host.endsWith('.gov.in') || host.endsWith('.nic.in') || host.endsWith('.edu') || host.endsWith('.ac.in')) {
-      return 'OFFICIAL_GOV';
+
+    // 1. Regulatory Authorities
+    const regulators = [
+      'nirfindia.org', 'aicte-india.org', 'ugc.ac.in', 'nba-india.org',
+      'beeindia.gov.in', 'rbi.org.in', 'sec.gov', 'sebi.gov.in',
+      'trai.gov.in', 'fcc.gov', 'fda.gov', 'who.int'
+    ];
+    if (regulators.some(r => host === r || host.endsWith('.' + r))) {
+      return 'REGULATOR';
     }
-    if (host.includes('wikipedia.org') || host.includes('arxiv.org') || host.includes('researchgate.net') || host.includes('ieee.org')) {
-      return 'ACADEMIC_INDUSTRY';
+
+    // 2. Government & Statutory Portals
+    if (
+      host.endsWith('.gov') || 
+      host.endsWith('.gov.in') || 
+      host.endsWith('.nic.in') ||
+      host.includes('rajasthan.gov.in') ||
+      host.includes('india.gov.in')
+    ) {
+      return 'GOVERNMENT_STATUTORY';
     }
-    if (host.includes('reuters.com') || host.includes('bloomberg.com') || host.includes('techcrunch.com') || host.includes('thehindu.com') || host.includes('livemint.com') || host.includes('economictimes.')) {
-      return 'SECONDARY_MEDIA';
+
+    // 3. Primary Academic & Scholarly Journals
+    const academicPrimaryHosts = [
+      'arxiv.org', 'ieee.org', 'acm.org', 'nature.com', 
+      'science.org', 'sciencedirect.com', 'springer.com', 'biorxiv.org'
+    ];
+    if (
+      host.endsWith('.edu') || 
+      host.endsWith('.ac.in') ||
+      academicPrimaryHosts.some(a => host === a || host.endsWith('.' + a))
+    ) {
+      return 'ACADEMIC_PRIMARY';
     }
-    if (host.includes('crunchbase.com') || host.includes('pitchbook.com') || host.includes('tracxn.com') || host.includes('yellowpages') || host.includes('justdial')) {
+
+    // 4. Secondary Education / Product Comparison Directories
+    const secondaryDirectories = [
+      'collegedunia.com', 'collegedekho.com', 'shiksha.com', 'careers360.com',
+      'getmyuni.com', 'universitykart.com', 'jagranjosh.com', 'sarvgyan.com',
+      'g2.com', 'capterra.com', 'trustradius.com', 'glassdoor.com', 'ambitionbox.com'
+    ];
+    if (secondaryDirectories.some(d => host.includes(d))) {
+      return 'SECONDARY_DIRECTORY';
+    }
+
+    // 5. Reference & Standard Documentation
+    if (
+      host.includes('wikipedia.org') || 
+      host.includes('wikimedia.org') ||
+      host.includes('developer.mozilla.org') ||
+      host.includes('w3.org') ||
+      host.includes('ecma-international.org')
+    ) {
+      return 'REFERENCE';
+    }
+
+    // 6. Primary Official Technology / Organization Platforms
+    const primaryTechPlatforms = [
+      'python.org', 'nodejs.org', 'typescriptlang.org', 'react.dev',
+      'angular.io', 'vuejs.org', 'golang.org', 'rust-lang.org',
+      'cursor.com', 'openai.com', 'anthropic.com', 'codeium.com',
+      'cognition.ai', 'github.com'
+    ];
+    if (primaryTechPlatforms.some(p => host === p || host.endsWith('.' + p))) {
+      return 'PRIMARY_ENTITY';
+    }
+
+    // Check if domain matches target entity name
+    if (targetEntityName) {
+      const cleanEntity = targetEntityName.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const cleanHost = host.replace(/[^a-z0-9]/g, '');
+      if (cleanEntity.length >= 3 && cleanHost.includes(cleanEntity)) {
+        return 'PRIMARY_ENTITY';
+      }
+    }
+
+    // 7. Reputable News & Publications
+    const reputablePubs = [
+      'reuters.com', 'bloomberg.com', 'thehindu.com', 'indianexpress.com',
+      'livemint.com', 'economictimes.indiatimes.com', 'techcrunch.com',
+      'wired.com', 'wsj.com', 'ft.com', 'bbc.com', 'apnews.com', 'hindustantimes.com'
+    ];
+    if (reputablePubs.some(p => host.includes(p))) {
+      return 'REPUTABLE_PUBLICATION';
+    }
+
+    // 8. Aggregators
+    const aggregators = [
+      'crunchbase.com', 'pitchbook.com', 'tracxn.com', 'justdial.com',
+      'indiamart.com', 'yellowpages', 'sulekha.com', 'meraev.com', 'ecogears.in', 'greenpages.co.in'
+    ];
+    if (aggregators.some(ag => host.includes(ag))) {
       return 'AGGREGATOR';
     }
-    return 'PRIMARY_COMPANY';
+
+    // 9. Industry Sources
+    if (host.includes('blog') || host.includes('stackshare.io') || host.includes('infoq.com') || host.includes('medium.com')) {
+      return 'INDUSTRY_SOURCE';
+    }
+
+    return 'UNKNOWN';
   } catch {
-    return 'UNVERIFIED';
+    return 'UNKNOWN';
   }
 }
 

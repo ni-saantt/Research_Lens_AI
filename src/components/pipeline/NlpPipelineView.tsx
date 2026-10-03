@@ -50,11 +50,11 @@ export function NlpPipelineView({ state }: NlpPipelineViewProps) {
   const stages: PipelineStage[] = [
     {
       id: 1,
-      title: 'Natural Language Input',
-      nlpSubdiscipline: 'Unstructured Human Language Processing',
+      title: 'Natural Language Input & Session Isolation',
+      nlpSubdiscipline: 'Unstructured Human Language Processing & Session Context Scoping',
       agent: 'User Interface / Dispatcher',
-      promptFile: 'src/App.tsx',
-      description: 'Accepts arbitrary natural-language research questions with complex constraints, temporal bounds, and domain specifications.',
+      promptFile: 'src/serverApp.ts & src/App.tsx',
+      description: 'Accepts arbitrary natural-language research questions with complex constraints, temporal bounds, and domain specifications, assigning a strictly isolated researchSessionId.',
       technicalRationale: 'Real-world research questions contain ambiguous phrasing, implicit requirements, and multi-faceted requests that cannot be handled by simple SQL queries.',
       icon: <FileText className="w-4 h-4 text-cyan-400" />,
       activeDataPreview: (s) => (
@@ -137,11 +137,11 @@ export function NlpPipelineView({ state }: NlpPipelineViewProps) {
     {
       id: 6,
       title: 'Multi-Agent LLM Processing',
-      nlpSubdiscipline: 'Parallel Dual-Vector Agent Execution',
+      nlpSubdiscipline: 'Sequential Dual-Vector Agent Execution',
       agent: 'Explorer & Investigator Agents',
-      promptFile: 'src/prompts/explorerPrompt.ts & investigatorPrompt.ts',
-      description: 'Concurrently runs two specialized agents: Explorer maximizes breadth, while Investigator executes adversarial cross-examination.',
-      technicalRationale: 'Prevents confirmation bias. A single agent tends to accept its first found source; two adversarial agents create genuine checks and balances.',
+      promptFile: 'src/prompts/explorerPrompt.ts & src/prompts/investigatorPrompt.ts',
+      description: 'Sequentially coordinates two specialized agents: Explorer discovers candidate entities and initial claims, then Investigator audits those discovered candidates against statutory orders, official gazettes, and primary documentation.',
+      technicalRationale: 'Prevents confirmation bias. Sequential execution allows the Investigator to directly inspect and stress-test the specific candidates surfaced by Explorer while remaining strictly within rate limits.',
       icon: <Cpu className="w-4 h-4 text-cyan-400" />,
       activeDataPreview: (s) => (
         <div className="grid grid-cols-2 gap-2 text-xs">

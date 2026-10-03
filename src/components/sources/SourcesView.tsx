@@ -6,6 +6,7 @@
 import React, { useState, useMemo } from 'react';
 import { Globe, Search, ExternalLink, ShieldCheck, Filter, Award, CheckCircle2 } from 'lucide-react';
 import { DiscoveredSource, SourceAuthority } from '../../types/research';
+import { getAuthorityBadgeConfig } from '../../utils/statusHelpers';
 
 interface SourcesViewProps {
   sources: DiscoveredSource[];
@@ -18,7 +19,13 @@ export function SourcesView({ sources, onSelectSource }: SourcesViewProps) {
 
   const filtered = useMemo(() => {
     return sources.filter(s => {
-      if (selectedAuthority !== 'ALL' && s.authority !== selectedAuthority) return false;
+      if (selectedAuthority !== 'ALL') {
+        if (selectedAuthority === 'GOVERNMENT' && s.authority !== 'GOVERNMENT_STATUTORY' && s.authority !== 'OFFICIAL_GOV' && s.authority !== 'REGULATOR') return false;
+        if (selectedAuthority === 'PRIMARY' && s.authority !== 'PRIMARY_ENTITY' && s.authority !== 'PRIMARY_COMPANY') return false;
+        if (selectedAuthority === 'ACADEMIC' && s.authority !== 'ACADEMIC_PRIMARY' && s.authority !== 'ACADEMIC_SECONDARY' && s.authority !== 'ACADEMIC_INDUSTRY') return false;
+        if (selectedAuthority === 'MEDIA' && s.authority !== 'REPUTABLE_PUBLICATION' && s.authority !== 'SECONDARY_MEDIA') return false;
+        if (selectedAuthority === 'DIRECTORY' && s.authority !== 'SECONDARY_DIRECTORY' && s.authority !== 'AGGREGATOR') return false;
+      }
       if (!filterDomain) return true;
       const q = filterDomain.toLowerCase();
       return s.domain.toLowerCase().includes(q) || s.title.toLowerCase().includes(q) || s.snippet.toLowerCase().includes(q);
@@ -26,35 +33,21 @@ export function SourcesView({ sources, onSelectSource }: SourcesViewProps) {
   }, [sources, filterDomain, selectedAuthority]);
 
   const authorityCounts = useMemo(() => {
-    const counts: Record<string, number> = {
-      ALL: sources.length,
-      OFFICIAL_GOV: 0,
-      PRIMARY_COMPANY: 0,
-      ACADEMIC_INDUSTRY: 0,
-      SECONDARY_MEDIA: 0,
-      AGGREGATOR: 0,
-    };
+    let gov = 0, pri = 0, aca = 0, med = 0, dir = 0;
     sources.forEach(s => {
-      if (s.authority in counts) counts[s.authority]++;
+      const a = s.authority;
+      if (a === 'GOVERNMENT_STATUTORY' || a === 'OFFICIAL_GOV' || a === 'REGULATOR') gov++;
+      else if (a === 'PRIMARY_ENTITY' || a === 'PRIMARY_COMPANY') pri++;
+      else if (a === 'ACADEMIC_PRIMARY' || a === 'ACADEMIC_SECONDARY' || a === 'ACADEMIC_INDUSTRY') aca++;
+      else if (a === 'REPUTABLE_PUBLICATION' || a === 'SECONDARY_MEDIA') med++;
+      else if (a === 'SECONDARY_DIRECTORY' || a === 'AGGREGATOR') dir++;
     });
-    return counts;
+    return { ALL: sources.length, GOVERNMENT: gov, PRIMARY: pri, ACADEMIC: aca, MEDIA: med, DIRECTORY: dir };
   }, [sources]);
 
-  const getAuthorityBadge = (auth: SourceAuthority) => {
-    switch (auth) {
-      case 'OFFICIAL_GOV':
-        return <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/80 border border-emerald-800/80 px-2 py-0.5 rounded font-semibold">Official Gov / Statutory</span>;
-      case 'PRIMARY_COMPANY':
-        return <span className="text-[10px] font-mono text-cyan-400 bg-cyan-950/80 border border-cyan-800/80 px-2 py-0.5 rounded font-semibold">Primary Source</span>;
-      case 'ACADEMIC_INDUSTRY':
-        return <span className="text-[10px] font-mono text-indigo-400 bg-indigo-950/80 border border-indigo-800/80 px-2 py-0.5 rounded font-semibold">Industry / Academic</span>;
-      case 'SECONDARY_MEDIA':
-        return <span className="text-[10px] font-mono text-amber-400 bg-amber-950/80 border border-amber-800/80 px-2 py-0.5 rounded font-semibold">News / Publication</span>;
-      case 'AGGREGATOR':
-        return <span className="text-[10px] font-mono text-purple-400 bg-purple-950/80 border border-purple-800/80 px-2 py-0.5 rounded font-semibold">Aggregator</span>;
-      default:
-        return <span className="text-[10px] font-mono text-neutral-400 bg-neutral-900 border border-neutral-800 px-2 py-0.5 rounded">Unverified Web</span>;
-    }
+  const renderBadge = (auth: SourceAuthority) => {
+    const cfg = getAuthorityBadgeConfig(auth);
+    return <span className={`text-[10px] font-mono px-2 py-0.5 rounded ${cfg.badgeClass}`}>{cfg.label}</span>;
   };
 
   return (
@@ -98,11 +91,11 @@ export function SourcesView({ sources, onSelectSource }: SourcesViewProps) {
       <div className="flex flex-wrap gap-1.5 p-1 bg-neutral-900/60 border border-neutral-800/80 rounded-lg">
         {[
           { id: 'ALL', label: 'All Sources', count: authorityCounts.ALL },
-          { id: 'OFFICIAL_GOV', label: 'Government', count: authorityCounts.OFFICIAL_GOV },
-          { id: 'PRIMARY_COMPANY', label: 'Primary Entity', count: authorityCounts.PRIMARY_COMPANY },
-          { id: 'ACADEMIC_INDUSTRY', label: 'Academic / Industry', count: authorityCounts.ACADEMIC_INDUSTRY },
-          { id: 'SECONDARY_MEDIA', label: 'Publications', count: authorityCounts.SECONDARY_MEDIA },
-          { id: 'AGGREGATOR', label: 'Aggregators', count: authorityCounts.AGGREGATOR },
+          { id: 'GOVERNMENT', label: 'Government / Regulator', count: authorityCounts.GOVERNMENT },
+          { id: 'PRIMARY', label: 'Primary Entity', count: authorityCounts.PRIMARY },
+          { id: 'ACADEMIC', label: 'Academic / Technical', count: authorityCounts.ACADEMIC },
+          { id: 'MEDIA', label: 'Publications', count: authorityCounts.MEDIA },
+          { id: 'DIRECTORY', label: 'Directories & Aggregators', count: authorityCounts.DIRECTORY },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -136,7 +129,7 @@ export function SourcesView({ sources, onSelectSource }: SourcesViewProps) {
                   {src.domain}
                 </span>
               </div>
-              {getAuthorityBadge(src.authority)}
+              {renderBadge(src.authority)}
             </div>
 
             <div className="text-xs font-medium text-neutral-200 line-clamp-1 mb-2">

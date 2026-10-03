@@ -155,9 +155,73 @@ app.post('/api/ask-dataset', async (req: Request, res: Response) => {
       answer: `There are currently ${entities.length} fully indexed and audited entities in the current session dataset.`,
       highlightEntities: entities.map((e: any) => e.name),
       filteredCount: entities.length,
-      provenanceNote: 'Calculated deterministically from in-memory session state.',
+      provenanceNote: 'Calculated deterministically from active in-memory session state.',
     });
     return;
+  }
+
+  // Deterministic handling for highest confidence query
+  if (qLower.includes('highest confidence') || qLower.includes('most confident')) {
+    const verifiedFindings: Array<{ entity: string; field: string; value: string; confidence: number; source: string }> = [];
+    entities.forEach((ent: any) => {
+      Object.entries(ent.fields || {}).forEach(([k, f]: [string, any]) => {
+        if (f && f.value !== null && f.verifiedStatus === 'VERIFIED' && typeof f.evidenceStrength === 'number') {
+          verifiedFindings.push({
+            entity: ent.name,
+            field: k,
+            value: f.value,
+            confidence: f.evidenceStrength,
+            source: f.sourceTitle || f.sourceUrl,
+          });
+        }
+      });
+    });
+
+    verifiedFindings.sort((a, b) => b.confidence - a.confidence);
+    const topFindings = verifiedFindings.slice(0, 5);
+
+    if (topFindings.length > 0) {
+      const summaryList = topFindings
+        .map(tf => `• ${tf.entity} — ${tf.field}: "${tf.value}" (${tf.confidence}% confidence, via ${tf.source})`)
+        .join('\n');
+      res.json({
+        answer: `The highest-confidence verified findings in the current session dataset are:\n\n${summaryList}`,
+        highlightEntities: Array.from(new Set(topFindings.map(tf => tf.entity))),
+        filteredCount: topFindings.length,
+        provenanceNote: 'Derived strictly from primary-corroborated claims with positive confidence scores.',
+      });
+      return;
+    }
+  }
+
+  // Deterministic handling for insufficient evidence query
+  if (qLower.includes('insufficient evidence') || qLower.includes('missing') || qLower.includes('unverified')) {
+    const missingFindings: Array<{ entity: string; field: string; note: string }> = [];
+    entities.forEach((ent: any) => {
+      Object.entries(ent.fields || {}).forEach(([k, f]: [string, any]) => {
+        if (!f || f.value === null || f.verifiedStatus === 'INSUFFICIENT_EVIDENCE') {
+          missingFindings.push({
+            entity: ent.name,
+            field: k,
+            note: f?.decisionBasis || f?.snippet || 'No authoritative public disclosure found',
+          });
+        }
+      });
+    });
+
+    if (missingFindings.length > 0) {
+      const missingList = missingFindings
+        .slice(0, 8)
+        .map(mf => `• ${mf.entity} — ${mf.field}: ${mf.note}`)
+        .join('\n');
+      res.json({
+        answer: `The following required fields have insufficient authoritative evidence in the current session dataset:\n\n${missingList}\n\nThese items are transparently recorded as null/unverified rather than fabricated.`,
+        highlightEntities: Array.from(new Set(missingFindings.map(mf => mf.entity))),
+        filteredCount: missingFindings.length,
+        provenanceNote: 'Derived from current session Quality Gate and missing field audit.',
+      });
+      return;
+    }
   }
 
   if (isGroqConfigured()) {
@@ -187,7 +251,7 @@ app.post('/api/ask-dataset', async (req: Request, res: Response) => {
 
   res.json({
     answer: matches.length > 0 
-      ? `Found ${matches.length} matching entities matching "${question}": ${matches.map((m: any) => m.name).join(', ')}.`
+      ? `Found ${matches.length} entities matching "${question}": ${matches.map((m: any) => m.name).join(', ')}.`
       : `No direct matches found in current dataset for "${question}". Try querying for specific entities, pricing, or locations.`,
     highlightEntities: matches.map((m: any) => m.name),
     filteredCount: matches.length,

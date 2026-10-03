@@ -128,7 +128,12 @@ export function CompareAgentsView({ state, onSelectConflict }: CompareAgentsView
                 </div>
 
                 <div className="mt-2.5 pt-2 text-[10px] text-amber-300 flex items-center justify-between border-t border-neutral-800/80 font-mono">
-                  <span>Arbiter: <span className="text-neutral-200 font-semibold">{cfl.arbiterDecision || 'ESCALATED'}</span></span>
+                  <div className="flex items-center gap-1.5">
+                    <span>Arbiter: <span className="text-neutral-200 font-semibold">{cfl.arbiterDecision || 'ESCALATED'}</span></span>
+                    <span className={`px-1.5 py-0.2 rounded text-[9px] ${cfl.resolutionStatus === 'RESOLVED' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-rose-950 text-rose-300 border border-rose-800'}`}>
+                      {cfl.resolutionStatus}
+                    </span>
+                  </div>
                   <span className="group-hover:translate-x-0.5 transition-transform text-neutral-400 flex items-center gap-1">
                     <span>Inspect</span>
                     <ArrowRight className="w-3 h-3" />
@@ -147,7 +152,7 @@ export function CompareAgentsView({ state, onSelectConflict }: CompareAgentsView
           <div className="flex items-center justify-between pb-2 border-b border-neutral-800/80">
             <div className="flex items-center gap-2">
               <div className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse" />
-              <h3 className="text-xs font-semibold text-cyan-300">Explorer Agent Output</h3>
+              <h3 className="text-xs font-semibold text-cyan-300">Explorer Agent Output (Discovery Vector)</h3>
             </div>
             <span className="text-[10px] font-mono text-neutral-400">
               {explorerClaims.length} Claims
@@ -164,7 +169,9 @@ export function CompareAgentsView({ state, onSelectConflict }: CompareAgentsView
                   <span className="text-neutral-200 font-semibold">{claim.entityName}</span>
                   <span className="text-cyan-400">{claim.fieldName}</span>
                 </div>
-                <div className="text-neutral-100 font-medium">{claim.value}</div>
+                <div className="text-neutral-100 font-medium">
+                  {claim.value !== null ? claim.value : <span className="text-amber-400 font-mono text-[11px]">[Insufficient Evidence]</span>}
+                </div>
                 <div className="text-[10px] text-neutral-500 truncate pt-1">
                   Source: {claim.sourceTitle} ({claim.sourceAuthority})
                 </div>
@@ -178,7 +185,7 @@ export function CompareAgentsView({ state, onSelectConflict }: CompareAgentsView
           <div className="flex items-center justify-between pb-2 border-b border-neutral-800/80">
             <div className="flex items-center gap-2">
               <div className="w-2.5 h-2.5 rounded-full bg-indigo-400 animate-pulse" />
-              <h3 className="text-xs font-semibold text-indigo-300">Investigator Agent Output</h3>
+              <h3 className="text-xs font-semibold text-indigo-300">Investigator Agent Output (Adversarial Vector)</h3>
             </div>
             <span className="text-[10px] font-mono text-neutral-400">
               {investigatorClaims.length} Claims
@@ -195,7 +202,9 @@ export function CompareAgentsView({ state, onSelectConflict }: CompareAgentsView
                   <span className="text-neutral-200 font-semibold">{claim.entityName}</span>
                   <span className="text-indigo-400">{claim.fieldName}</span>
                 </div>
-                <div className="text-neutral-100 font-medium">{claim.value}</div>
+                <div className="text-neutral-100 font-medium">
+                  {claim.value !== null ? claim.value : <span className="text-amber-400 font-mono text-[11px]">[No Authoritative Filing / Missing]</span>}
+                </div>
                 <div className="text-[10px] text-neutral-500 truncate pt-1">
                   Source: {claim.sourceTitle} ({claim.sourceAuthority})
                 </div>
